@@ -1,15 +1,10 @@
 {
-    "name": "Kivy Android Builder",
-    "image": "ghcr.io/kivy/buildozer:latest",
-    "remoteUser": "user",
-    "mounts": [
-        "source=kivy-android-sdk-cache,target=/home/user/.buildozer,type=volume"
-    ],
-    "customizations": {
-        "vscode": {
-            "extensions": [
-                "ms-python.python"
-            ]
+    "name": "Kivy Buildozer Environment",
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+    "features": {
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.11"
         }
-    }
+    },
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libssl-dev libffi-dev libgomp1 && pip3 install --user --upgrade buildozer cython virtualenv"
 }
