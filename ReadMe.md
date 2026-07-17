@@ -17,3 +17,6 @@ remote: Enumerating objects: 13, done.
 remote: Counting objects: 100% (13/13), done.
 remote: Compressing objects: 100% (11/11), done.
 fatal: fetch-pack: invalid index-pack output
+
+
+cd /workspaces/kivy && latest_apk=$(basename "$(ls -1t bin/*.apk | head -1)") && git add -A && git commit -m "${latest_apk}" && git push 
