@@ -1,4 +1,3 @@
-# No Chinese characters in UI strings, log messages, or any output. Comments may be in Chinese.
 import sys
 import threading
 import time
@@ -47,7 +46,6 @@ def rpc_set_temp(delta):
 # =============================================================================
 import rpc
 rpc_server, rpc_thread = rpc.start_rpc_server(port=1133, key='', globals=globals(), locals=locals())
-
 
 # 配置 Windows 调试下的字体 (Config for Windows debugging)
 if platform != 'android':
@@ -117,12 +115,14 @@ if HAS_JNI:
         @java_method('(Ljava/lang/String;)V')
         def onScanError(self, message):
             pass
+
 # =============================================================================
 # GATT 连接及状态回调
 # =============================================================================
 if HAS_JNI:
     class GattCallback(PythonJavaClass):
         __javainterfaces__ = ['org/qgb/ble/GattListener']
+        __javacontext__ = 'app'  # <-- Added: Required for custom APK interfaces
 
         def __init__(self, scanner, device_addr, device_name):
             super().__init__()
@@ -146,7 +146,13 @@ if HAS_JNI:
         @java_method('([B)V')
         def onCharacteristicChanged(self, value):
             try:
-                hex_data = bytes(value).hex().upper() if value else ""
+                # Proactive Fix: Java byte array contains signed bytes (-128 to 127). 
+                # Python's bytes() expects unsigned (0-255). We must apply bitwise AND 0xFF to prevent ValueError.
+                if value:
+                    unsigned_bytes = [b & 0xFF for b in value]
+                    hex_data = bytes(unsigned_bytes).hex().upper()
+                else:
+                    hex_data = ""
                 Clock.schedule_once(lambda dt: self.scanner.handle_characteristic_changed(hex_data), 0)
             except Exception:
                 pass
