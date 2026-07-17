@@ -1,4 +1,4 @@
-from rpc import start_rpc_server#
+from rpc import start_rpc_server
 start_rpc_server(port=1133, key='', globals=globals(), locals=locals())
 
 import sys, threading, time
@@ -14,17 +14,28 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.textinput import TextInput          # ← 补充导入 TextInput
 from kivy.clock import Clock, mainthread
 from kivy.core.clipboard import Clipboard
-from jnius import autoclass, java_method,PythonJavaClass
+from jnius import autoclass, java_method, PythonJavaClass
 
 
-# 核心修复点 1：必须在全局作用域通过直系继承的方式构建抽象类子类
+# ===== 核心修复：定义蓝牙 GATT 回调基类 =====
+class BluetoothGattCallback(PythonJavaClass):
+    """
+    必须通过 __javaclass__ 映射到 Android 原生类，
+    才能被 Java 虚拟机正确识别为 BluetoothGattCallback 实例。
+    """
+    __javaclass__ = 'android/bluetooth/BluetoothGattCallback'
+    # 无需在此实现任何方法，GattCallback 会通过 @java_method 覆盖
+
+
 class MyScanCallback(PythonJavaClass):
-    __javaclass__ = 'android/bluetooth/le/ScanCallback'  # 正确！必须用斜杠“/”
+    """扫描回调（虽未使用但保留，以防后期 BLE 扫描需求）"""
+    __javaclass__ = 'android/bluetooth/le/ScanCallback'
 
 
-class GattCallback(BluetoothGattCallback):
+class GattCallback(BluetoothGattCallback):  # ← 继承自刚才定义的 Python 基类
     __javacontext__ = 'app'
 
     def __init__(self, scanner, device_addr, device_name):
@@ -35,10 +46,11 @@ class GattCallback(BluetoothGattCallback):
 
     @java_method('(Landroid/bluetooth/BluetoothGatt;II)V')
     def onConnectionStateChange(self, gatt, status, newState):
-        if newState == 2:  # BluetoothProfile.STATE_CONNECTED
+        BluetoothProfile = autoclass('android.bluetooth.BluetoothProfile')
+        if newState == BluetoothProfile.STATE_CONNECTED:
             self.scanner.show_message(f'[GATT] 成功连接到 {self.device_name}，正在拉取服务列表...', (0,1,0,1))
             gatt.discoverServices()
-        elif newState == 0:  # BluetoothProfile.STATE_DISCONNECTED
+        elif newState == BluetoothProfile.STATE_DISCONNECTED:
             self.scanner.show_message(f'[GATT] 与 {self.device_name} 断开连接', (1,1,0,1))
             self.scanner.reset_ac_status()
             gatt.close()
@@ -51,29 +63,27 @@ class GattCallback(BluetoothGattCallback):
                 UUID = autoclass('java.util.UUID')
                 srv_uuid = UUID.fromString(self.scanner.MIDEA_SERVICE_UUID)
                 service = gatt.getService(srv_uuid)
-                
+
                 if service:
                     self.scanner.show_message('[GATT] 找到美的/华凌空调核心服务：FFA0', (0,1,0,1))
-                    
-                    # 缓存写特征值，供空调控制面板按钮使用
+
                     write_uuid = UUID.fromString(self.scanner.MIDEA_WRITE_UUID)
                     self.scanner.active_write_char = service.getCharacteristic(write_uuid)
                     self.scanner.active_gatt = gatt
-                    
-                    # 激活通知特征值 FFA2
+
                     notify_char_uuid = UUID.fromString(self.scanner.MIDEA_NOTIFY_UUID)
                     notify_char = service.getCharacteristic(notify_char_uuid)
-                    
+
                     if notify_char:
                         gatt.setCharacteristicNotification(notify_char, True)
-                        
+
                         cccd_uuid = UUID.fromString(self.scanner.CCCD_UUID)
                         descriptor = notify_char.getDescriptor(cccd_uuid)
-                        
+
                         BluetoothGattDescriptor = autoclass('android.bluetooth.BluetoothGattDescriptor')
                         descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                         gatt.writeDescriptor(descriptor)
-                        
+
                         self.scanner.show_message('[GATT] 蓝牙通道建立完毕！面板已解锁，可发送握手或控制指令。', (0,1,0,1))
                         self.scanner.set_ac_ready(self.device_name)
                     else:
@@ -90,14 +100,12 @@ class GattCallback(BluetoothGattCallback):
         if status == 0:
             self.scanner.show_message(f'[发送成功] 数据已写入空调特征值')
 
-    # 兼容低版本与高版本 Android 的经典 BLE 通知回调签名
     @java_method('(Landroid/bluetooth/BluetoothGatt;Landroid/bluetooth/BluetoothCharacteristic;)V')
     def onCharacteristicChanged(self, gatt, characteristic):
         try:
             value = characteristic.getValue()
             hex_data = bytes(value).hex().upper()
             self.scanner.show_message(f'[收到硬件返回] 原始包: {hex_data}', (0,1,0,1))
-            # 后续在此处对接你的 bluetooth-crypto.js 移植过的 handleSecurityLayerMsgC2 解密函数
         except Exception as e:
             self.scanner.show_message(f'[错误] 接收通知解析失败: {e}', (1,0,0,1))
 
@@ -107,15 +115,15 @@ class DeviceItem(BoxLayout):
         super().__init__(orientation='horizontal', size_hint_y=None, height=50, **kwargs)
         self.callback = callback
         self.device_address = address
-        
+
         self.name_label = Label(text=name, size_hint_x=0.4, halign='left', valign='middle')
         self.name_label.bind(size=self.name_label.setter('text_size'))
         self.addr_label = Label(text=address, size_hint_x=0.4, halign='center', valign='middle')
         self.addr_label.bind(size=self.addr_label.setter('text_size'))
-        
+
         self.connect_btn = Button(text='连接空调', size_hint_x=0.2)
         self.connect_btn.bind(on_press=lambda x: self.callback(self.device_address))
-        
+
         self.add_widget(self.name_label)
         self.add_widget(self.addr_label)
         self.add_widget(self.connect_btn)
@@ -124,19 +132,16 @@ class DeviceItem(BoxLayout):
 class BluetoothScanner(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation='vertical', **kwargs)
-        
-        # 蓝牙底层配置参数
+
         self.MIDEA_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
-        self.MIDEA_WRITE_UUID = "0000ffa1-0000-1000-8000-00805f9b34fb"
-        self.MIDEA_NOTIFY_UUID = "0000ffa2-0000-1000-8000-00805f9b34fb"
-        self.CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
-        
-        # 动态连接与控制句柄
+        self.MIDEA_WRITE_UUID    = "0000ffa1-0000-1000-8000-00805f9b34fb"
+        self.MIDEA_NOTIFY_UUID   = "0000ffa2-0000-1000-8000-00805f9b34fb"
+        self.CCCD_UUID           = "00002902-0000-1000-8000-00805f9b34fb"
+
         self.active_gatt = None
         self.active_write_char = None
-        self.callback_reference = None  # 极其关键！防止 Python 加密回调类被 JVM 垃圾回收导致断连
-        
-        # 空调内部状态追踪
+        self.callback_reference = None
+
         self.ac_power = False
         self.ac_temp = 26
         self.ac_modes = ["制冷 ❄️", "制热 🔥", "送风 🌪️", "除湿 💧"]
@@ -144,9 +149,7 @@ class BluetoothScanner(BoxLayout):
         self.ac_fans = ["自动", "低风", "中风", "高风"]
         self.ac_fan_index = 0
 
-        # === 布局构建 ===
-        
-        # 1. 顶部操作栏
+        # ---------- 界面构建 ----------
         top_bar = BoxLayout(orientation='horizontal', size_hint_y=0.08)
         self.scan_btn = Button(text='搜索设备', size_hint_x=0.3)
         self.scan_btn.bind(on_press=self.start_scan)
@@ -158,26 +161,21 @@ class BluetoothScanner(BoxLayout):
         top_bar.add_widget(self.title_label)
         self.add_widget(top_bar)
 
-        # 2. 设备搜索列表区
         self.device_container = BoxLayout(orientation='vertical', size_hint_y=None)
         self.device_container.bind(minimum_height=self.device_container.setter('height'))
         scroll = ScrollView(size_hint_y=0.22)
         scroll.add_widget(self.device_container)
         self.add_widget(scroll)
 
-        # 3. 核心改造：专属空调遥控面板区域
         self.panel_box = BoxLayout(orientation='vertical', size_hint_y=0.5, padding=10, spacing=8)
-        
-        # 遥控器当前状态看板
+
         self.status_bar = Label(text="当前状态: 未连接设备", size_hint_y=0.15, color=(1,1,0,1))
         self.panel_box.add_widget(self.status_bar)
-        
-        # 开关按钮
+
         self.btn_power = Button(text="开关：关 🔴", size_hint_y=0.2, disabled=True)
         self.btn_power.bind(on_press=self.toggle_power)
         self.panel_box.add_widget(self.btn_power)
-        
-        # 温度调节控制行
+
         temp_layout = BoxLayout(orientation='horizontal', size_hint_y=0.22)
         self.btn_temp_down = Button(text="温度 －", disabled=True)
         self.btn_temp_down.bind(on_press=lambda x: self.change_temp(-1))
@@ -188,8 +186,7 @@ class BluetoothScanner(BoxLayout):
         temp_layout.add_widget(self.temp_display)
         temp_layout.add_widget(self.btn_temp_up)
         self.panel_box.add_widget(temp_layout)
-        
-        # 模式与风速控制行
+
         mode_fan_layout = BoxLayout(orientation='horizontal', size_hint_y=0.22)
         self.btn_mode = Button(text="模式: 制冷 ❄️", disabled=True)
         self.btn_mode.bind(on_press=self.cycle_mode)
@@ -198,15 +195,14 @@ class BluetoothScanner(BoxLayout):
         mode_fan_layout.add_widget(self.btn_mode)
         mode_fan_layout.add_widget(self.btn_fan)
         self.panel_box.add_widget(mode_fan_layout)
-        
-        # 自定义握手按钮 (用于向空调下发安全验证层 c1 包)
+
         self.btn_handshake = Button(text="同步并握手 (发送安全秘钥协商)", size_hint_y=0.21, disabled=True)
         self.btn_handshake.bind(on_press=self.send_security_handshake)
         self.panel_box.add_widget(self.btn_handshake)
-        
+
         self.add_widget(self.panel_box)
 
-        # 4. 底层调试日志输出区 (压缩至底部的 20% 高度)
+        # 日志区（使用 TextInput 而非 Label，方便滚动复制）
         self.msg_text = TextInput(text='', readonly=True, multiline=True,
                                   size_hint_y=0.2,
                                   background_color=(0.1,0.1,0.1,1),
@@ -243,13 +239,13 @@ class BluetoothScanner(BoxLayout):
             from android.permissions import request_permissions, Permission
             self.cast_func = cast
             BluetoothAdapter = autoclass('android.bluetooth.BluetoothAdapter')
-            
+
             request_permissions([
                 Permission.BLUETOOTH_SCAN,
                 Permission.BLUETOOTH_CONNECT,
                 Permission.ACCESS_FINE_LOCATION
             ])
-            
+
             self.adapter = BluetoothAdapter.getDefaultAdapter()
             if self.adapter and self.adapter.isEnabled():
                 self.show_message('[系统提示] 蓝牙底层就绪')
@@ -261,9 +257,14 @@ class BluetoothScanner(BoxLayout):
             if not self.adapter or not self.adapter.isEnabled():
                 self.show_message('[错误] 请先开启手机蓝牙功能', (1,0,0,1))
                 return
+            # 防止 cast_func 未就绪
+            if self.cast_func is None:
+                self.show_message('[错误] 初始化尚未完成，请稍后重试', (1,0,0,1))
+                return
+
             self.device_container.clear_widgets()
             self.devices.clear()
-            
+
             from android.broadcast import BroadcastReceiver
             self.br = BroadcastReceiver(self.on_broadcast, actions=['android.bluetooth.device.action.FOUND'])
             self.br.start()
@@ -301,31 +302,26 @@ class BluetoothScanner(BoxLayout):
             return
         self.devices[addr] = dev
         name = dev.getName() or '未知设备'
-        
-        # 只要包含了 midea 或者是常见的空调前缀，优先高亮排列在最前面
         item = DeviceItem(name, addr, self.on_device_connect)
         self.device_container.add_widget(item)
 
     def on_device_connect(self, mac_addr):
         dev = self.devices.get(mac_addr)
-        if not dev: return
+        if not dev:
+            return
         self.stop_scan(None)
-        
+
         name = dev.getName() or '未知空调'
         self.show_message(f'[连接中] 正在直连 {name} 的 BLE GATT 服务...')
-        
-        # 核心修复点 2：实例化修正后的抽象类，并将其长期挂载在实例上，绝不能作为局部变量被 GC
+
         self.callback_reference = GattCallback(self, mac_addr, name)
-        
+
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         context = PythonActivity.mActivity
         dev.connectGatt(context, False, self.callback_reference)
 
-    # === 空调控制台业务交互逻辑 ===
-
     @mainthread
     def set_ac_ready(self, name):
-        """蓝牙握手通路就绪，点亮遥控器面板"""
         self.status_bar.text = f"已连接设备: {name} (就绪)"
         self.status_bar.color = (0,1,0,1)
         self.btn_power.disabled = False
@@ -337,7 +333,6 @@ class BluetoothScanner(BoxLayout):
 
     @mainthread
     def reset_ac_status(self):
-        """断开连接时，锁定遥控器面板"""
         self.status_bar.text = "当前状态: 未连接设备 (断开)"
         self.status_bar.color = (1,0,0,1)
         self.btn_power.disabled = True
@@ -372,42 +367,32 @@ class BluetoothScanner(BoxLayout):
         self.send_current_ac_frame()
 
     def send_security_handshake(self, instance):
-        """模拟发送安全层密钥协商消息（JS 中的 step1 / c1 协商包）"""
         if self.active_gatt and self.active_write_char:
             self.show_message("[BIZ] 正在向 FFA1 接口下发安全层验证数据包...")
-            
-            # 此处模拟 c1 包的基本格式，具体字节请根据 protocol-security.js 构造
+            # 模拟 c1 包，请根据实际协议修改
             mock_c1_packet = bytearray([0x5A, 0x0A, 0x03, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF])
-            
             self.active_write_char.setValue(mock_c1_packet)
             self.active_gatt.writeCharacteristic(self.active_write_char)
         else:
             self.show_message("[警告] 空调蓝牙未就绪，无法发送指令", (1,1,0,1))
 
     def send_current_ac_frame(self):
-        """将当前面板状态（开关、温度、模式、风速）组合为华凌业务指令帧并下发"""
         if self.active_gatt and self.active_write_char:
-            # 基础输出提示
             mode_str = self.ac_modes[self.ac_mode_index]
             fan_str = self.ac_fans[self.ac_fan_index]
             self.show_message(f"[指令组合] 下发控制状态 -> 开关:{self.ac_power}, 温度:{self.ac_temp}, 模式:{mode_str}, 风速:{fan_str}")
-            
-            # TODO: 配合你在 protocol-biz.js 中解出来的业务协议逻辑进行拼包
-            # 美的系红外/蓝牙业务指令通常以 0xAA 开头，后续包含温度字节、模式字节等，末尾计算校验和
-            biz_packet = bytearray(20)
-            biz_packet[0] = 0xAA
-            biz_packet[1] = 0x23  # 长度
-            biz_packet[2] = 0xAC  # 设备品类：空调
-            # ...中间字节写入具体的温度参数（例如 self.ac_temp）和加密字段
-            
-            # 此处由于未引入具体的 JS 协议逻辑，先作为通路调试框架：
+
+            # TODO: 根据实际协议拼接业务数据包
+            # biz_packet = bytearray(20)
+            # ... 填充数据
             # self.active_write_char.setValue(biz_packet)
             # self.active_gatt.writeCharacteristic(self.active_write_char)
         else:
             self.show_message("[警告] 设备未处于连接就绪状态，控制指令未发送", (1,1,0,1))
 
     def on_pause(self):
-        if self.br: self.br.stop()
+        if self.br:
+            self.br.stop()
         if self.active_gatt:
             self.active_gatt.close()
         return True
