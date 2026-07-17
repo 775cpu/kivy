@@ -78,9 +78,10 @@ UUID = None
 BluetoothGattDescriptor = None
 PythonActivity = None
 BluetoothDevice = None
+BleBridge = None
 
 def cache_android_classes():
-    global BluetoothAdapter, BluetoothProfile, UUID, BluetoothGattDescriptor, PythonActivity, BluetoothDevice
+    global BluetoothAdapter, BluetoothProfile, UUID, BluetoothGattDescriptor, PythonActivity, BluetoothDevice, BleBridge
     if platform == 'android' and HAS_JNI:
         BluetoothAdapter = autoclass('android.bluetooth.BluetoothAdapter')
         BluetoothProfile = autoclass('android.bluetooth.BluetoothProfile')
@@ -88,51 +89,40 @@ def cache_android_classes():
         BluetoothGattDescriptor = autoclass('android.bluetooth.BluetoothGattDescriptor')
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         BluetoothDevice = autoclass('android.bluetooth.BluetoothDevice')
+        BleBridge = autoclass('org.qgb.ble.BleBridge')
 
 # =============================================================================
 # BLE 专用扫描回调：在 Binder 线程存活期内瞬间提取数据，完全避开官方广播接收器的死指针缺陷
 # =============================================================================
 if HAS_JNI:
-    class BleScanCallback(PythonJavaClass):
-    __javaclass__ = 'android/bluetooth/le/ScanCallback'
-    __javainterfaces__ = []
+    class ScanListener(PythonJavaClass):
+        __javainterfaces__ = ['org/qgb/ble/BleBridge$ScanListener']
+        __javacontext__ = 'app'
 
-    def __init__(self, scanner_widget):
-        super().__init__()
-        self.scanner_widget = scanner_widget
+        def __init__(self, scanner_widget):
+            super().__init__()
+            self.scanner_widget = scanner_widget
 
-    @java_method('(ILandroid/bluetooth/le/ScanResult;)V')
-    def onScanResult(self, callbackType, result):
-        # 绝对严禁在此处调用 result.getDevice()
-        # 这里只能获取基础信息，并立即抛给主线程
-        try:
-            # 获取 device 对象本身是可以的，但不要去调用它的方法
-            device = result.getDevice()
-            # 这里的转换需要极其谨慎，直接将其作为参数传给主线程
-            # 在主线程中再进行后续的字符串提取
-            addr = str(device.getAddress())
-            name = str(device.getName() or 'Unknown Device')
-            
-            # 使用主线程调度，完全离开 Binder 线程栈帧
-            Clock.schedule_once(lambda dt: self.scanner_widget.handle_discovered_device(addr, name), 0)
-        except Exception:
-            # 忽略任何潜在的 JNI 线程越界异常
+        @java_method('(Ljava/lang/String;Ljava/lang/String;I)V')
+        def onDeviceFound(self, address, name, rssi):
+            address = str(address or '')
+            name = str(name or 'Unknown Device')
+            rssi = int(rssi)
+            Clock.schedule_once(lambda dt: self.scanner_widget.handle_discovered_device(address, name), 0)
+
+        @java_method('(I)V')
+        def onScanFailed(self, errorCode):
             pass
 
-    @java_method('(Ljava/util/List;)V')
-    def onBatchScanResults(self, results):
-        pass
-
-    @java_method('(I)V')
-    def onScanFailed(self, errorCode):
-        pass
+        @java_method('(Ljava/lang/String;)V')
+        def onScanError(self, message):
+            pass
 # =============================================================================
 # GATT 连接及状态回调
 # =============================================================================
 if HAS_JNI:
     class GattCallback(PythonJavaClass):
-        __javaclass__ = 'android/bluetooth/BluetoothGattCallback'
-        __javainterfaces__ = []
+        __javainterfaces__ = ['org/qgb/ble/BleBridge$GattListener']
 
         def __init__(self, scanner, device_addr, device_name):
             super().__init__()
@@ -140,27 +130,25 @@ if HAS_JNI:
             self.device_addr = device_addr
             self.device_name = device_name
 
-        @java_method('(Landroid/bluetooth/BluetoothGatt;II)V')
-        def onConnectionStateChange(self, gatt, status, newState):
+        @java_method('(II)V')
+        def onConnectionStateChange(self, status, newState):
             # 将基础数据类型传回主线程
             Clock.schedule_once(lambda dt: self.scanner.handle_connection_state(status, newState, self.device_name), 0)
 
-        @java_method('(Landroid/bluetooth/BluetoothGatt;I)V')
-        def onServicesDiscovered(self, gatt, status):
+        @java_method('(I)V')
+        def onServicesDiscovered(self, status):
             Clock.schedule_once(lambda dt: self.scanner.handle_services_discovered(status, self.device_name), 0)
 
-        @java_method('(Landroid/bluetooth/BluetoothGatt;Landroid/bluetooth/BluetoothCharacteristic;I)V')
-        def onCharacteristicWrite(self, gatt, characteristic, status):
+        @java_method('(I)V')
+        def onCharacteristicWrite(self, status):
             Clock.schedule_once(lambda dt: self.scanner.handle_characteristic_write(status), 0)
 
-        @java_method('(Landroid/bluetooth/BluetoothGatt;Landroid/bluetooth/BluetoothCharacteristic;)V')
-        def onCharacteristicChanged(self, gatt, characteristic):
+        @java_method('([B)V')
+        def onCharacteristicChanged(self, value):
             try:
-                value = characteristic.getValue()
                 hex_data = bytes(value).hex().upper() if value else ""
-                # 转换十六进制字符串后再传回主线程，严禁跨线程传递 characteristic
                 Clock.schedule_once(lambda dt: self.scanner.handle_characteristic_changed(hex_data), 0)
-            except Exception as e:
+            except Exception:
                 pass
 
 
@@ -199,9 +187,8 @@ class BluetoothScanner(BoxLayout):
         self.active_gatt = None
         self.active_write_char = None
         self.callback_reference = None
-        
-        self.le_scanner = None
-        self.scan_callback = None
+        self.scan_listener = None
+        self.scan_session = None
 
         self.ac_power = False
         self.ac_temp = 26
@@ -301,6 +288,7 @@ class BluetoothScanner(BoxLayout):
                 Permission.ACCESS_FINE_LOCATION
             ])
 
+            self.scan_listener = ScanListener(self)
             self.adapter = BluetoothAdapter.getDefaultAdapter()
             if self.adapter and self.adapter.isEnabled():
                 self.show_message('[System] Bluetooth ready')
@@ -316,15 +304,16 @@ class BluetoothScanner(BoxLayout):
             self.device_container.clear_widgets()
             self.devices.clear()
 
-            # 使用现代 Android BLE 专用 Scanner
-            self.le_scanner = self.adapter.getBluetoothLeScanner()
-            if not self.le_scanner:
-                self.show_message('[Error] BLE Scanner init failed', (1,0,0,1))
+            context = PythonActivity.mActivity
+            if context is None:
+                self.show_message('[Error] Activity context is null', (1,0,0,1))
                 return
 
-            self.scan_callback = BleScanCallback(self)
-            self.le_scanner.startScan(self.scan_callback)
-            
+            self.scan_session = BleBridge.startScan(context, self.scan_listener)
+            if self.scan_session is None:
+                self.show_message('[Error] BLE scan session init failed', (1,0,0,1))
+                return
+
             self.scan_btn.text = 'Scanning...'
             self.scan_btn.disabled = True
             Clock.schedule_once(self.stop_scan, 10)
@@ -333,15 +322,14 @@ class BluetoothScanner(BoxLayout):
 
     def stop_scan(self, dt):
         try:
-            if self.le_scanner and self.scan_callback:
-                self.le_scanner.stopScan(self.scan_callback)
-        except:
+            if self.scan_session:
+                self.scan_session.stop()
+        except Exception:
             pass
         finally:
             self.scan_btn.text = 'Scan Devices'
             self.scan_btn.disabled = False
-            self.scan_callback = None
-            self.le_scanner = None
+            self.scan_session = None
 
     def handle_discovered_device(self, addr, name):
         if addr in self.devices:
@@ -366,8 +354,6 @@ class BluetoothScanner(BoxLayout):
 
     def _do_connect(self, mac_addr, name):
         try:
-            # 在主线程落地的一瞬间，当场向适配器索要一个干净局部的实例
-            dev = self.adapter.getRemoteDevice(mac_addr)
             self.callback_reference = GattCallback(self, mac_addr, name)
             context = PythonActivity.mActivity
             
@@ -376,7 +362,9 @@ class BluetoothScanner(BoxLayout):
                 self.show_message('[Fatal] Activity Context is null. App in background?', (1,0,0,1))
                 return
 
-            self.active_gatt = dev.connectGatt(context, False, self.callback_reference)
+            self.active_gatt = BleBridge.connectGatt(context, mac_addr, False, self.callback_reference)
+            if not self.active_gatt:
+                self.show_message(f'[Fatal] connectGatt returned null for {mac_addr}', (1,0,0,1))
         except Exception as e:
             self.show_message(f'[Fatal] ConnectGatt invocation failed: {e}', (1,0,0,1))
 
@@ -515,9 +503,11 @@ class BluetoothScanner(BoxLayout):
             self.show_message("[Warning] Device not connected, command ignored", (1,1,0,1))
 
     def on_pause(self):
-        if self.le_scanner and self.scan_callback:
-            try: self.le_scanner.stopScan(self.scan_callback)
+        if self.scan_session:
+            try:
+                self.scan_session.stop()
             except: pass
+            self.scan_session = None
         if self.active_gatt:
             self.active_gatt.close()
             self.active_gatt = None
