@@ -96,7 +96,7 @@ def cache_android_classes():
 # =============================================================================
 if HAS_JNI:
     class ScanListener(PythonJavaClass):
-        __javainterfaces__ = ['org/qgb/ble/BleBridge$ScanListener']
+        __javainterfaces__ = ['org/qgb/ble/ScanListener']
         __javacontext__ = 'app'
 
         def __init__(self, scanner_widget):
@@ -122,7 +122,7 @@ if HAS_JNI:
 # =============================================================================
 if HAS_JNI:
     class GattCallback(PythonJavaClass):
-        __javainterfaces__ = ['org/qgb/ble/BleBridge$GattListener']
+        __javainterfaces__ = ['org/qgb/ble/GattListener']
 
         def __init__(self, scanner, device_addr, device_name):
             super().__init__()

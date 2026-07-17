@@ -15,20 +15,6 @@ import java.util.List;
 public final class BleBridge {
     private BleBridge() {
     }
-
-    public interface GattListener {
-        void onConnectionStateChange(int status, int newState);
-        void onServicesDiscovered(int status);
-        void onCharacteristicWrite(int status);
-        void onCharacteristicChanged(byte[] value);
-    }
-
-    public interface ScanListener {
-        void onDeviceFound(String address, String name, int rssi);
-        void onScanFailed(int errorCode);
-        void onScanError(String message);
-    }
-
     public static final class ScanSession {
         private final BluetoothLeScanner scanner;
         private final ScanCallback callback;
