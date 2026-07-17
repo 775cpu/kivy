@@ -19,7 +19,9 @@ from kivy.core.clipboard import Clipboard
 from jnius import autoclass, java_method
 
 # 核心修复点 1：必须在全局作用域通过直系继承的方式构建抽象类子类
-BluetoothGattCallback = autoclass('android.bluetooth.BluetoothGattCallback')
+class MyScanCallback(PythonJavaClass):
+    __javaclass__ = 'android/bluetooth/le/ScanCallback'  # 正确！必须用斜杠“/”
+
 
 class GattCallback(BluetoothGattCallback):
     __javacontext__ = 'app'
