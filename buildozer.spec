@@ -1,14 +1,14 @@
 [app]
-title = My Kivy App
-package.name = mykivyapp
-package.domain = qgb.hualing
+title = hualing
+package.name = hualing
+package.domain = qgb
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 icon.filename = icon.bmp
 icon.adaptive_icon_background = #FF0000
 icon.adaptive_icon_foreground = icon.bmp
 version = 0.1
-requirements = hostpython3==3.11.9, python3==3.11.9, kivy, android, able_recipe
+requirements = hostpython3==3.11.9, python3==3.11.9, kivy, android, able_recipe,pyjnius
 # 增加了 INTERNET 权限以允许网络套接字(Socket)运行
 android.permissions = INTERNET, BLUETOOTH, BLUETOOTH_ADMIN, BLUETOOTH_SCAN, BLUETOOTH_CONNECT, ACCESS_FINE_LOCATION
 orientation = portrait

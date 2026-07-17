@@ -16,7 +16,8 @@ from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock, mainthread
 from kivy.core.clipboard import Clipboard
-from jnius import autoclass, java_method
+from jnius import autoclass, java_method,PythonJavaClass
+
 
 # 核心修复点 1：必须在全局作用域通过直系继承的方式构建抽象类子类
 class MyScanCallback(PythonJavaClass):
