@@ -3,12 +3,13 @@ import rpc
 rpc_server, rpc_thread = rpc.start_rpc_server(port=1133, key='', globals=globals(), locals=locals())
 
 from collections import deque
-from functools import partial
-import binascii
 import os
 import traceback
 import hashlib
+import hmac as hmac_lib
 import random
+import struct
+import pyaes
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -23,107 +24,97 @@ from jnius import autoclass, PythonJavaClass, java_method, cast
 PythonActivity = autoclass('org.kivy.android.PythonActivity')
 Context = autoclass('android.content.Context')
 Build_VERSION = autoclass('android.os.Build$VERSION')
-Build_VERSION_CODES = autoclass('android.os.Build$VERSION_CODES')
 PackageManager = autoclass('android.content.pm.PackageManager')
-BluetoothAdapter = autoclass('android.bluetooth.BluetoothAdapter')
 BluetoothProfile = autoclass('android.bluetooth.BluetoothProfile')
 BluetoothGattDescriptor = autoclass('android.bluetooth.BluetoothGattDescriptor')
 UUID = autoclass('java.util.UUID')
 String = autoclass('java.lang.String')
 BleBridge = autoclass('org.qgb.ble.BleBridge')
+KeyPairGenerator = autoclass('java.security.KeyPairGenerator')
+KeyAgreement = autoclass('javax.crypto.KeyAgreement')
+KeyFactory = autoclass('java.security.KeyFactory')
+ECGenParameterSpec = autoclass('java.security.spec.ECGenParameterSpec')
+ECPublicKeySpec = autoclass('java.security.spec.ECPublicKeySpec')
+ECPoint = autoclass('java.security.spec.ECPoint')
+BigInteger = autoclass('java.math.BigInteger')
 
 KV = r'''
 <RootWidget>:
     orientation: 'vertical'
     padding: dp(12)
     spacing: dp(10)
-
     canvas.before:
         Color:
             rgba: 0.08, 0.09, 0.11, 1
         Rectangle:
             pos: self.pos
             size: self.size
-
     Label:
         text: app.title_text
         size_hint_y: None
         height: dp(36)
-        color: 1, 1, 1, 1
+        color: 1,1,1,1
         font_size: '20sp'
         bold: True
-
     Label:
         text: app.status_text
         text_size: self.width, None
         halign: 'left'
         valign: 'middle'
-        color: 0.7, 0.9, 1, 1
+        color: 0.7,0.9,1,1
         size_hint_y: None
         height: dp(70)
-
     Label:
         text: app.device_text
         text_size: self.width, None
         halign: 'left'
         valign: 'middle'
-        color: 0.9, 0.9, 0.9, 1
+        color: 0.9,0.9,0.9,1
         size_hint_y: None
         height: dp(45)
-
     Label:
         text: app.handshake_text
         text_size: self.width, None
         halign: 'left'
         valign: 'middle'
-        color: 1, 0.85, 0.4, 1
+        color: 1,0.85,0.4,1
         size_hint_y: None
         height: dp(45)
-
     BoxLayout:
         size_hint_y: None
         height: dp(48)
         spacing: dp(8)
-
         Button:
-            text: '重新扫描'
+            text: 'Rescan'
             on_release: app.manual_rescan()
-
         Button:
-            text: '断开'
+            text: 'Disconnect'
             on_release: app.manual_disconnect()
-
         Button:
-            text: '重连'
+            text: 'Reconnect'
             on_release: app.manual_reconnect()
-
     BoxLayout:
         size_hint_y: None
         height: dp(48)
         spacing: dp(8)
-
         Button:
-            text: '开/关机'
+            text: 'Power Toggle'
             disabled: not app.control_ready
             on_release: app.toggle_power()
-
         Button:
-            text: '握手'
+            text: 'Handshake'
             disabled: not app.gatt_ready
             on_release: app.send_security_handshake()
-
     BoxLayout:
         orientation: 'vertical'
         size_hint_y: None
         height: dp(170)
         spacing: dp(8)
-
         Label:
-            text: '温度: {}°C'.format(app.target_temp)
-            color: 1, 1, 1, 1
+            text: 'Temp: {}°C'.format(app.target_temp)
+            color: 1,1,1,1
             size_hint_y: None
             height: dp(28)
-
         Slider:
             min: 16
             max: 30
@@ -131,74 +122,60 @@ KV = r'''
             value: app.target_temp
             disabled: not app.control_ready
             on_value: app.on_temp_slider(self.value)
-
         BoxLayout:
             size_hint_y: None
             height: dp(44)
             spacing: dp(8)
-
             Button:
-                text: '制冷'
+                text: 'Cool'
                 disabled: not app.control_ready
                 on_release: app.set_mode('cool')
-
             Button:
-                text: '制热'
+                text: 'Heat'
                 disabled: not app.control_ready
                 on_release: app.set_mode('heat')
-
             Button:
-                text: '送风'
+                text: 'Fan'
                 disabled: not app.control_ready
                 on_release: app.set_mode('fan')
-
             Button:
-                text: '除湿'
+                text: 'Dry'
                 disabled: not app.control_ready
                 on_release: app.set_mode('dry')
-
             Button:
-                text: '自动'
+                text: 'Auto'
                 disabled: not app.control_ready
                 on_release: app.set_mode('auto')
-
         BoxLayout:
             size_hint_y: None
             height: dp(44)
             spacing: dp(8)
-
             Button:
-                text: '自动风'
+                text: 'Auto Fan'
                 disabled: not app.control_ready
                 on_release: app.set_fan('auto')
-
             Button:
-                text: '低风'
+                text: 'Low'
                 disabled: not app.control_ready
                 on_release: app.set_fan('low')
-
             Button:
-                text: '中风'
+                text: 'Med'
                 disabled: not app.control_ready
                 on_release: app.set_fan('medium')
-
             Button:
-                text: '高风'
+                text: 'High'
                 disabled: not app.control_ready
                 on_release: app.set_fan('high')
-
     Label:
         text: app.control_text
         text_size: self.width, None
         halign: 'left'
         valign: 'middle'
-        color: 0.85, 1, 0.85, 1
+        color: 0.85,1,0.85,1
         size_hint_y: None
         height: dp(70)
-
     ScrollView:
         do_scroll_x: False
-
         Label:
             text: app.log_text
             text_size: self.width, None
@@ -206,234 +183,345 @@ KV = r'''
             height: self.texture_size[1]
             halign: 'left'
             valign: 'top'
-            color: 0.85, 0.85, 0.85, 1
+            color: 0.85,0.85,0.85,1
 '''
-
 Builder.load_string(KV)
-
 
 class RootWidget(BoxLayout):
     pass
 
-
-# ---------- Permission callback ----------
+# ---------- Callbacks ----------
 class PermissionCallback(PythonJavaClass):
     __javainterfaces__ = ['org/kivy/android/PythonActivity$PermissionsCallback']
     __javacontext__ = 'app'
-
     def __init__(self, owner):
         super().__init__()
         self.owner = owner
-
     @java_method('([Ljava/lang/String;[I)V')
     def onRequestPermissionsResult(self, permissions, grantResults):
         Clock.schedule_once(lambda dt: self.owner._on_permissions_result(permissions, grantResults), 0)
 
-
-# ---------- BLE Scan callback ----------
 class PyScanListener(PythonJavaClass):
     __javainterfaces__ = ['org/qgb/ble/ScanListener']
     __javacontext__ = 'app'
-
     def __init__(self, owner):
         super().__init__()
         self.owner = owner
-
     @java_method('(Ljava/lang/String;Ljava/lang/String;I)V')
     def onDeviceFound(self, address, name, rssi):
-        addr = str(address) if address is not None else ''
-        dev_name = str(name) if name is not None else ''
+        addr = str(address) if address else ''
+        dev_name = str(name) if name else ''
         Clock.schedule_once(lambda dt: self.owner._on_scan_device_found(addr, dev_name, int(rssi)), 0)
-
     @java_method('(I)V')
     def onScanFailed(self, errorCode):
         Clock.schedule_once(lambda dt: self.owner._on_scan_failed(int(errorCode)), 0)
-
     @java_method('(Ljava/lang/String;)V')
     def onScanError(self, message):
-        msg = str(message) if message is not None else ''
+        msg = str(message) if message else ''
         Clock.schedule_once(lambda dt: self.owner._on_scan_error(msg), 0)
 
-
-# ---------- GATT callback (using org.qgb.ble.GattListener interface) ----------
 class PyGattCallback(PythonJavaClass):
     __javainterfaces__ = ['org/qgb/ble/GattListener']
     __javacontext__ = 'app'
-
     def __init__(self, owner, generation, device_name):
         super().__init__()
         self.owner = owner
         self.generation = generation
         self.device_name = device_name
-
     def _valid(self):
-        return self.owner is not None and self.generation == self.owner.connection_generation
-
+        return self.owner and self.generation == self.owner.connection_generation
     @java_method('(II)V')
     def onConnectionStateChange(self, status, newState):
-        Clock.schedule_once(
-            lambda dt: self.owner._on_gatt_connection_state_change(
-                self.generation, int(status), int(newState)
-            ), 0
-        )
-
+        Clock.schedule_once(lambda dt: self.owner._on_gatt_connection_state_change(
+            self.generation, int(status), int(newState)), 0)
     @java_method('(I)V')
     def onServicesDiscovered(self, status):
-        Clock.schedule_once(
-            lambda dt: self.owner._on_gatt_services_discovered(
-                self.generation, int(status)
-            ), 0
-        )
-
+        Clock.schedule_once(lambda dt: self.owner._on_gatt_services_discovered(
+            self.generation, int(status)), 0)
     @java_method('(I)V')
     def onCharacteristicWrite(self, status):
-        # Write callback signature in GattListener: (I)V, only status
-        Clock.schedule_once(
-            lambda dt: self.owner._on_gatt_characteristic_write(
-                self.generation, int(status)
-            ), 0
-        )
-
+        Clock.schedule_once(lambda dt: self.owner._on_gatt_characteristic_write(
+            self.generation, int(status)), 0)
     @java_method('([B)V')
     def onCharacteristicChanged(self, value):
         if value:
-            unsigned_bytes = [b & 0xFF for b in value]
-            hex_data = bytes(unsigned_bytes).hex().upper()
+            unsigned = [b & 0xFF for b in value]
+            hex_data = bytes(unsigned).hex().upper()
         else:
             hex_data = ""
-        Clock.schedule_once(
-            lambda dt: self.owner._on_gatt_characteristic_changed(
-                self.generation, hex_data
-            ), 0
-        )
+        Clock.schedule_once(lambda dt: self.owner._on_gatt_characteristic_changed(
+            self.generation, hex_data), 0)
 
-
-# ---------- Helpers ----------
+# ---------- Cryptographic helpers ----------
 def hexstr(data: bytes) -> str:
     return data.hex().upper()
 
-
 def from_hex(s: str) -> bytes:
     s = (s or '').replace(' ', '').replace(':', '')
-    if len(s) % 2 != 0:
-        raise ValueError('hex length must be even')
+    if len(s) % 2:
+        raise ValueError('even hex length required')
     return bytes.fromhex(s)
 
-
-def checksum_1_complement(frame_without_last_checksum: bytes) -> int:
-    total = sum(frame_without_last_checksum) & 0xFF
+def checksum_neg(data: bytes) -> int:
+    total = sum(data) & 0xFF
     return (1 + (~total)) & 0xFF
-
-
-def build_aa55_frame(msg_type: int, payload: bytes, random_byte: int = None) -> bytes:
-    if random_byte is None:
-        random_byte = random.randint(0, 255)
-    body_len = len(payload) + 4
-    frame = bytearray(2 + 1 + 1 + 1 + len(payload) + 1)
-    frame[0] = 0xAA
-    frame[1] = 0x55
-    frame[2] = body_len & 0xFF
-    frame[3] = random_byte & 0xFF
-    frame[4] = msg_type & 0xFF
-    frame[5:5 + len(payload)] = payload
-    frame[-1] = checksum_1_complement(frame[2:-1])
-    return bytes(frame)
-
 
 def chunked(data: bytes, size: int):
     for i in range(0, len(data), size):
-        yield data[i:i + size]
+        yield data[i:i+size]
 
+def hkdf_sha256(ikm: bytes, salt: bytes, info: bytes, length: int) -> bytes:
+    if salt is None:
+        salt = b'\x00' * 32
+    prk = hmac_lib.new(salt, ikm, hashlib.sha256).digest()
+    t = b""
+    okm = b""
+    for i in range(1, (length + 31) // 32 + 1):
+        t = hmac_lib.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+        okm += t
+    return okm[:length]
 
-# ---------- Protocol builder ----------
+# ECDH
+def generate_ec_keypair():
+    kg = KeyPairGenerator.getInstance("EC")
+    ecSpec = ECGenParameterSpec("secp256r1")
+    kg.initialize(ecSpec)
+    kp = kg.generateKeyPair()
+    priv = kp.getPrivate()
+    pub = kp.getPublic()
+    x = pub.getW().getAffineX().toByteArray()
+    y = pub.getW().getAffineY().toByteArray()
+    def pad32(b):
+        b = bytes(b)
+        if len(b) > 32:
+            b = b[-32:]
+        elif len(b) < 32:
+            b = b'\x00' * (32 - len(b)) + b
+        return b
+    pub_bytes = b'\x04' + pad32(x) + pad32(y)
+    return priv, pub_bytes
+
+def ecdh_shared_secret(priv_key, peer_pub_64: bytes) -> bytes:
+    x_bytes = peer_pub_64[:32]
+    y_bytes = peer_pub_64[32:]
+    x = BigInteger(1, x_bytes)
+    y = BigInteger(1, y_bytes)
+    tmp_kg = KeyPairGenerator.getInstance("EC")
+    tmp_kg.initialize(ECGenParameterSpec("secp256r1"))
+    tmp_kp = tmp_kg.generateKeyPair()
+    params = tmp_kp.getPublic().getParams()
+    pub_spec = ECPublicKeySpec(ECPoint(x, y), params)
+    kf = KeyFactory.getInstance("EC")
+    peer_pub = kf.generatePublic(pub_spec)
+    ka = KeyAgreement.getInstance("ECDH")
+    ka.init(priv_key)
+    ka.doPhase(peer_pub, True)
+    shared = ka.generateSecret()
+    return bytes(shared)
+
+# AES-CCM implementation using pyaes
+def aes_ccm_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes=b'', tag_len: int=8) -> bytes:
+    # CCM parameters: L = 2 for 8-byte nonce, M = tag_len
+    # Build B0 block
+    flags = ((aad and 1) << 6) | (((tag_len - 2) // 2) << 3) | (2 - 1)
+    b0 = bytes([flags]) + nonce + struct.pack('>H', len(plaintext))
+    if aad:
+        if len(aad) < 0xFF00:
+            aad_len = struct.pack('>H', len(aad))
+        else:
+            aad_len = b'\xFF\xFE' + struct.pack('>I', len(aad))
+        auth_data = b0 + aad_len + aad
+    else:
+        auth_data = b0
+    # CBC-MAC
+    mac = bytes(16)
+    aes_ecb = pyaes.AESModeOfOperationECB(key)
+    for i in range(0, len(auth_data), 16):
+        block = auth_data[i:i+16]
+        if len(block) < 16:
+            block = block + b'\x00' * (16 - len(block))
+        mac = aes_ecb.encrypt(xor_bytes(mac, block))
+    # CTR mode encryption
+    ctr_base = bytes([2 - 1]) + nonce  # flags = (L-1) = 1
+    keystream = b''
+    ciphertext = b''
+    block_count = (len(plaintext) + 15) // 16
+    for j in range(block_count):
+        ctr_block = ctr_base + struct.pack('>H', j)
+        ks = aes_ecb.encrypt(ctr_block)
+        keystream += ks
+        chunk = plaintext[j*16:(j+1)*16]
+        ciphertext += bytes([c ^ k for c, k in zip(chunk, ks)])
+    # Final tag
+    # Encrypt MAC (first 16 bytes) with CTR using counter 0, then truncate to tag_len
+    ctr0 = ctr_base + b'\x00\x00'
+    tag_encrypted = aes_ecb.encrypt(ctr0)
+    tag = xor_bytes(mac[:tag_len], tag_encrypted[:tag_len])
+    return ciphertext + tag
+
+def aes_ccm_decrypt(key: bytes, nonce: bytes, ciphertext_tag: bytes, aad: bytes=b'', tag_len: int=8) -> bytes:
+    ciphertext = ciphertext_tag[:-tag_len]
+    tag = ciphertext_tag[-tag_len:]
+    # Recompute MAC
+    flags = ((aad and 1) << 6) | (((tag_len - 2) // 2) << 3) | (2 - 1)
+    b0 = bytes([flags]) + nonce + struct.pack('>H', len(ciphertext))
+    if aad:
+        if len(aad) < 0xFF00:
+            aad_len = struct.pack('>H', len(aad))
+        else:
+            aad_len = b'\xFF\xFE' + struct.pack('>I', len(aad))
+        auth_data = b0 + aad_len + aad
+    else:
+        auth_data = b0
+    mac = bytes(16)
+    aes_ecb = pyaes.AESModeOfOperationECB(key)
+    for i in range(0, len(auth_data), 16):
+        block = auth_data[i:i+16]
+        if len(block) < 16:
+            block = block + b'\x00' * (16 - len(block))
+        mac = aes_ecb.encrypt(xor_bytes(mac, block))
+    ctr_base = bytes([2 - 1]) + nonce
+    ctr0 = ctr_base + b'\x00\x00'
+    tag_encrypted = aes_ecb.encrypt(ctr0)
+    expected_tag = xor_bytes(mac[:tag_len], tag_encrypted[:tag_len])
+    if tag != expected_tag:
+        raise ValueError("CCM tag mismatch")
+    # Decrypt
+    plaintext = b''
+    keystream = b''
+    for j in range((len(ciphertext) + 15) // 16):
+        ctr_block = ctr_base + struct.pack('>H', j)
+        ks = aes_ecb.encrypt(ctr_block)
+        keystream += ks
+        chunk = ciphertext[j*16:(j+1)*16]
+        plaintext += bytes([c ^ k for c, k in zip(chunk, ks)])
+    return plaintext
+
+def xor_bytes(a, b):
+    return bytes(x ^ y for x, y in zip(a, b))
+
+# ---------- Protocol ----------
 class MideaProtocol:
-    APP_FIXED = b'midea_bleapp'
-
-    MSG_C1 = 0x01
-    MSG_C2 = 0x02
-    MSG_C3 = 0x03
-    MSG_C4 = 0x04
+    CONN_T1 = 0x01
+    CONN_T2 = 0x02
+    CONN_T3 = 0x03
+    SEC_C1 = 0x01
+    SEC_C2 = 0x02
+    SEC_C3 = 0x03
+    BIZ_TYPE_AC = 32
 
     def __init__(self):
-        self.last_session_key = None
-        self.last_root_key = None
+        self.root_key = None
+        self.session_key = None
+        self.ec_priv = None
+        self.ec_pub_64 = None
+        self.conn_seq = random.randint(1, 255)
+        self.sec_seq = 0
 
-    def create_root_key(self, advertis_data_hex: str) -> bytes:
+    def derive_root_key(self, advertis_data_hex: str) -> bytes:
         ad = from_hex(advertis_data_hex) if advertis_data_hex else b''
-        digest = hashlib.sha256(ad + self.APP_FIXED).digest()
-        key = digest[:16]
-        self.last_root_key = key
-        return key
+        self.root_key = hkdf_sha256(ad, None, b'midea_bleapp', 16)
+        return self.root_key
 
-    def build_c1_payload(self, advertis_data_hex: str) -> bytes:
+    def create_ec_keypair(self):
+        priv, pub_full = generate_ec_keypair()
+        self.ec_priv = priv
+        self.ec_pub_64 = pub_full[1:]  # strip 0x04
+        return self.ec_pub_64
+
+    def derive_session_key(self, peer_pub_64: bytes):
+        shared = ecdh_shared_secret(self.ec_priv, peer_pub_64)
+        self.session_key = hashlib.sha256(shared).digest()[:16]
+        return self.session_key
+
+    def build_conn_frame(self, conn_type: int, payload: bytes) -> bytes:
+        seq = self.conn_seq
+        self.conn_seq = (self.conn_seq + 1) & 0xFF
+        body_len = len(payload) + 4
+        frame = bytearray(2 + 1 + 1 + 1 + len(payload) + 1)
+        frame[0] = 0xAA
+        frame[1] = 0x55
+        frame[2] = body_len & 0xFF
+        frame[3] = seq
+        frame[4] = conn_type
+        frame[5:5+len(payload)] = payload
+        frame[-1] = checksum_neg(frame[2:-1])
+        return bytes(frame)
+
+    def build_security_frame(self, cmd: int, body: bytes) -> bytes:
+        self.sec_seq = (self.sec_seq + 1) & 0xFF
+        length = len(body)
+        return bytes([cmd, self.sec_seq, length]) + body
+
+    def encrypt_security_payload(self, key: bytes, security_bytes: bytes) -> bytes:
+        nonce = os.urandom(8)
+        ct = aes_ccm_encrypt(key, nonce, security_bytes, b'', 8)
+        return nonce + ct
+
+    def decrypt_security_payload(self, key: bytes, blob: bytes) -> bytes:
+        nonce = blob[:8]
+        ct_tag = blob[8:]
+        return aes_ccm_decrypt(key, nonce, ct_tag, b'', 8)
+
+    def build_c1_frame(self) -> bytes:
+        openid = os.urandom(6)
+        sec = self.build_security_frame(self.SEC_C1, openid)
+        encrypted = self.encrypt_security_payload(self.root_key, sec)
+        return self.build_conn_frame(self.CONN_T2, encrypted)
+
+    def build_c2_frame(self) -> bytes:
+        sec = self.build_security_frame(self.SEC_C2, b'')
+        encrypted = self.encrypt_security_payload(self.root_key, sec)
+        return self.build_conn_frame(self.CONN_T2, encrypted)
+
+    def build_c3_frame(self, my_pub_64: bytes, advertis_data_hex: str) -> bytes:
         ad = from_hex(advertis_data_hex) if advertis_data_hex else b''
-        digest = hashlib.md5(ad + b'c1').digest()
-        return b'\x01' + digest
+        encrypted_ad = aes_ccm_encrypt(self.session_key, os.urandom(8), ad, b'', 8)
+        body = my_pub_64 + encrypted_ad
+        sec = self.build_security_frame(self.SEC_C3, body)
+        encrypted = self.encrypt_security_payload(self.root_key, sec)
+        return self.build_conn_frame(self.CONN_T2, encrypted)
 
-    def build_c1_frame(self, advertis_data_hex: str) -> bytes:
-        payload = self.build_c1_payload(advertis_data_hex)
-        return build_aa55_frame(self.MSG_C1, payload)
+    def build_biz_frame(self, biz_type: int, body: bytes) -> bytes:
+        length = len(body) + 4
+        biz = bytearray(2 + 1 + len(body) + 1)
+        biz[0] = biz_type
+        biz[1] = length & 0xFF
+        biz[2] = 0x00
+        biz[3:3+len(body)] = body
+        biz[-1] = checksum_neg(biz[:len(body)+3])
+        encrypted = aes_ccm_encrypt(self.session_key, os.urandom(8), bytes(biz), b'', 8)
+        return self.build_conn_frame(self.CONN_T3, encrypted)
 
-    def build_control_plain_payload(self, power: bool, temp: int, mode: str, fan: str) -> bytes:
-        mode_map = {
-            'auto': 0x00,
-            'cool': 0x01,
-            'dry': 0x02,
-            'fan': 0x03,
-            'heat': 0x04,
-        }
-        fan_map = {
-            'auto': 0x00,
-            'low': 0x01,
-            'medium': 0x02,
-            'high': 0x03,
-        }
-
-        temp = max(16, min(30, int(temp)))
-        mode_v = mode_map.get(mode, 0x01)
-        fan_v = fan_map.get(fan, 0x00)
-        power_v = 0x01 if power else 0x00
-
-        payload = bytes([
-            0x5A,
-            0x0C,
-            0x02,
-            power_v,
-            temp,
-            mode_v,
-            fan_v,
-            0x00,
-            0x00,
-            0x00,
-            0x00,
-        ])
-        cs = checksum_1_complement(payload)
-        return payload + bytes([cs])
-
-    def encrypt_business_payload(self, plain_payload: bytes) -> bytes:
-        return plain_payload
-
-    def build_control_frame(self, power: bool, temp: int, mode: str, fan: str) -> bytes:
-        plain = self.build_control_plain_payload(power, temp, mode, fan)
-        cipher = self.encrypt_business_payload(plain)
-        return build_aa55_frame(self.MSG_C2, cipher)
-
+    def parse_conn_frame(self, data: bytes):
+        if len(data) < 4:
+            return None
+        if data[0] != 0xAA or data[1] != 0x55:
+            return None
+        body_len = data[2]
+        frame_len = 2 + 1 + body_len
+        if len(data) < frame_len:
+            return None
+        frame = data[:frame_len]
+        chk = checksum_neg(frame[2:-1])
+        if chk != frame[-1]:
+            return None
+        conn_type = frame[4]
+        payload = frame[5:-1]
+        return conn_type, payload, frame_len
 
 # ---------- Main App ----------
 class HualingACApp(App):
-    title_text = StringProperty('华凌空调 BLE 控制')
-    status_text = StringProperty('初始化中...')
-    device_text = StringProperty('设备: 未连接')
-    handshake_text = StringProperty('握手: 未开始')
-    control_text = StringProperty('状态: Power=False Temp=25 Mode=cool Fan=auto')
+    title_text = StringProperty('Midea AC BLE Control')
+    status_text = StringProperty('Initializing...')
+    device_text = StringProperty('Device: Not Connected')
+    handshake_text = StringProperty('Handshake: Not Started')
+    control_text = StringProperty('Status: Power=False Temp=25 Mode=cool Fan=auto')
     log_text = StringProperty('')
-
     gatt_ready = BooleanProperty(False)
     control_ready = BooleanProperty(False)
-
     target_temp = NumericProperty(25)
 
-    # Midea service UUIDs
     MIDEA_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
     MIDEA_WRITE_UUID    = "0000ffa1-0000-1000-8000-00805f9b34fb"
     MIDEA_NOTIFY_UUID   = "0000ffa2-0000-1000-8000-00805f9b34fb"
@@ -441,63 +529,45 @@ class HualingACApp(App):
 
     def build(self):
         self.root_widget = RootWidget()
-
         self.activity = PythonActivity.mActivity
         self.context = self.activity.getApplicationContext()
-
         self.protocol = MideaProtocol()
-
         self.permission_callback = PermissionCallback(self)
-
         self.scan_listener = None
         self.scan_session = None
-
         self.gatt_callback = None
         self.gatt = None
         self.write_char = None
-
         self.is_paused = False
         self.permissions_ok = False
-
         self.is_scanning = False
         self.is_connecting = False
         self.is_connected = False
         self.notification_ready = False
         self.handshake_done = False
-
         self.connection_generation = 0
-
-        self.current_device = None
-        self.current_device_name = ''
         self.current_device_addr = ''
+        self.current_device_name = ''
         self.current_advertis_data = ''
-
         self.seen_devices = {}
-        self.auto_target_locked = False
-
         self.write_queue = deque()
         self.write_in_progress = False
         self.last_write_tag = ''
-
         self.auto_reconnect_event = None
         self.scan_timeout_event = None
         self.handshake_timeout_event = None
         self.auto_send_event = None
-
         self.desired_power = False
         self.desired_mode = 'cool'
         self.desired_fan = 'auto'
         self.target_temp = 25
-
-        self._log('App started')
+        self.rx_buffer = b''
+        self._log('[App] Starting...')
         Clock.schedule_once(lambda dt: self.startup(), 0.2)
         return self.root_widget
 
-    # ------------------------------------------------------------------
-    # Logging / UI
-    # ------------------------------------------------------------------
     def _log(self, msg):
-        print(msg)
+        print(f'[BLE-DEBUG] {msg}')
         lines = self.log_text.split('\n') if self.log_text else []
         lines.append(msg)
         if len(lines) > 120:
@@ -510,88 +580,53 @@ class HualingACApp(App):
 
     def _refresh_control_text(self):
         self.control_text = (
-            f'状态: Power={self.desired_power} '
+            f'Status: Power={self.desired_power} '
             f'Temp={int(self.target_temp)} '
             f'Mode={self.desired_mode} '
             f'Fan={self.desired_fan}'
         )
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
     def on_start(self):
         self._refresh_control_text()
-
     def on_pause(self):
         self.is_paused = True
-        self._set_status('[LIFE] on_pause')
         self.stop_scan()
         return True
-
     def on_resume(self):
         self.is_paused = False
-        self._set_status('[LIFE] on_resume')
         Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), 0.8)
-
     def on_stop(self):
-        self._set_status('[LIFE] on_stop')
         self.cleanup_all()
-
     def cleanup_all(self):
         self.cancel_timers()
         self.stop_scan()
-        self.disconnect_gatt(clear_target=False)
-
+        self.disconnect_gatt(False)
     def cancel_timers(self):
-        for ev_name in ('auto_reconnect_event', 'scan_timeout_event', 'handshake_timeout_event', 'auto_send_event'):
-            ev = getattr(self, ev_name, None)
-            if ev is not None:
-                try:
-                    ev.cancel()
-                except Exception:
-                    pass
-                setattr(self, ev_name, None)
+        for ev in ('auto_reconnect_event','scan_timeout_event','handshake_timeout_event','auto_send_event'):
+            e = getattr(self, ev, None)
+            if e:
+                try: e.cancel()
+                except: pass
+                setattr(self, ev, None)
 
-    # ------------------------------------------------------------------
-    # Permissions
-    # ------------------------------------------------------------------
     def startup(self):
         self.request_permissions()
-
     def _required_permissions(self):
-        perms = []
-        sdk = int(Build_VERSION.SDK_INT)
-        if sdk >= 31:
-            perms.extend([
-                "android.permission.BLUETOOTH_SCAN",
-                "android.permission.BLUETOOTH_CONNECT",
-            ])
+        if int(Build_VERSION.SDK_INT) >= 31:
+            return ["android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT"]
         else:
-            perms.extend([
-                "android.permission.ACCESS_FINE_LOCATION",
-                "android.permission.ACCESS_COARSE_LOCATION",
-                "android.permission.BLUETOOTH",
-                "android.permission.BLUETOOTH_ADMIN",
-            ])
-        return perms
-
+            return ["android.permission.ACCESS_FINE_LOCATION","android.permission.ACCESS_COARSE_LOCATION",
+                    "android.permission.BLUETOOTH","android.permission.BLUETOOTH_ADMIN"]
     def request_permissions(self):
         perms = self._required_permissions()
-        missing = []
-        for p in perms:
-            if self.activity.checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED:
-                missing.append(p)
-
+        missing = [p for p in perms if self.activity.checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED]
         if not missing:
             self.permissions_ok = True
-            self._set_status('[PERM] Permissions already granted')
             Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), 0.2)
             return
-
-        self._set_status('[PERM] Requesting Bluetooth permissions...')
+        self._set_status('[PERM] Requesting permissions...')
         self.activity.addPermissionsCallback(self.permission_callback)
         self.activity.requestPermissions(missing, 1001)
-
     def _on_permissions_result(self, permissions, grantResults):
         ok = True
         if grantResults is None:
@@ -601,7 +636,6 @@ class HualingACApp(App):
                 if int(grantResults[i]) != PackageManager.PERMISSION_GRANTED:
                     ok = False
                     break
-
         self.permissions_ok = ok
         if ok:
             self._set_status('[PERM] Permissions granted')
@@ -609,164 +643,75 @@ class HualingACApp(App):
         else:
             self._set_status('[PERM] Permission denied')
 
-    # ------------------------------------------------------------------
-    # Scan / Connect orchestration
-    # ------------------------------------------------------------------
     def ensure_scan_or_connect(self):
-        if self.is_paused or not self.permissions_ok:
-            return
-
-        if self.is_connected or self.is_connecting:
-            return
-
+        if self.is_paused or not self.permissions_ok: return
+        if self.is_connected or self.is_connecting: return
         if self.current_device_addr:
-            self._set_status(f'[AUTO] Try reconnect {self.current_device_name or self.current_device_addr}')
             self.connect_to_device(self.current_device_addr, self.current_device_name, self.current_advertis_data)
         else:
             self.start_scan()
-
     def manual_rescan(self):
-        self._set_status('[UI] manual rescan')
-        self.auto_target_locked = False
-        self.current_device = None
-        self.current_device_name = ''
-        self.current_device_addr = ''
-        self.current_advertis_data = ''
         self.stop_scan()
-        self.disconnect_gatt(clear_target=True)
+        self.disconnect_gatt(True)
+        self.seen_devices.clear()
+        self.current_device_addr = ''
         Clock.schedule_once(lambda dt: self.start_scan(), 0.2)
-
-    def manual_disconnect(self):
-        self._set_status('[UI] manual disconnect')
-        self.disconnect_gatt(clear_target=False)
-
+    def manual_disconnect(self): self.disconnect_gatt(False)
     def manual_reconnect(self):
-        self._set_status('[UI] manual reconnect')
-        self.disconnect_gatt(clear_target=False)
+        self.disconnect_gatt(False)
         Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), 0.8)
-
     def start_scan(self):
-        if self.is_paused or not self.permissions_ok:
-            return
-        if self.is_scanning:
-            return
-
+        if self.is_paused or not self.permissions_ok: return
+        if self.is_scanning: return
         self.stop_scan()
         self.scan_listener = PyScanListener(self)
-        self.scan_session = BleBridge.createScanSession(self.context, self.scan_listener)
-
-        ok = False
-        try:
-            ok = bool(self.scan_session.start())
-        except Exception as e:
-            self._set_status(f'[SCAN] start exception: {e}')
-            traceback.print_exc()
-
-        if ok:
+        self.scan_session = BleBridge.startScan(self.context, self.scan_listener)
+        if self.scan_session is not None:
             self.is_scanning = True
-            self._set_status('[SCAN] Started BLE scan')
             self.scan_timeout_event = Clock.schedule_once(lambda dt: self._on_scan_timeout(), 12)
+            self._log('[SCAN] Started')
         else:
-            self._set_status('[SCAN] Failed to start')
+            self._log('[SCAN] Failed')
             self.schedule_reconnect()
-
     def stop_scan(self):
         self.is_scanning = False
-        if self.scan_timeout_event is not None:
-            try:
-                self.scan_timeout_event.cancel()
-            except Exception:
-                pass
+        if self.scan_timeout_event:
+            self.scan_timeout_event.cancel()
             self.scan_timeout_event = None
-
-        if self.scan_session is not None:
-            try:
-                self.scan_session.stop()
-            except Exception as e:
-                self._log(f'[SCAN] stop exception: {e}')
-        self.scan_session = None
+        if self.scan_session:
+            try: self.scan_session.stop()
+            except: pass
+            self.scan_session = None
         self.scan_listener = None
-
     def _on_scan_timeout(self):
         self.scan_timeout_event = None
-        if self.is_connected or self.is_connecting:
-            return
-        self._set_status('[SCAN] Timeout, restarting...')
-        self.stop_scan()
-        Clock.schedule_once(lambda dt: self.start_scan(), 1.0)
-
-    def _on_scan_failed(self, errorCode):
-        self._set_status(f'[SCAN] Failed code={errorCode}')
+        if self.is_connected or self.is_connecting: return
+        self._log('[SCAN] Timeout')
         self.stop_scan()
         self.schedule_reconnect()
-
-    def _on_scan_error(self, message):
-        self._set_status(f'[SCAN] Error: {message}')
+    def _on_scan_failed(self, code):
+        self._log(f'[SCAN] Failed {code}')
         self.stop_scan()
         self.schedule_reconnect()
-
-    def _normalize_name(self, name):
-        return (name or '').strip().lower()
-
-    def _device_score(self, name, rssi):
-        n = self._normalize_name(name)
+    def _on_scan_error(self, msg):
+        self._log(f'[SCAN] Error {msg}')
+        self.stop_scan()
+        self.schedule_reconnect()
+    def _on_scan_device_found(self, addr, name, rssi):
+        if not addr: return
         score = 0
-        if 'midea' in n:
-            score += 100
-        if 'hualing' in n:
-            score += 100
-        if 'air' in n or 'ac' in n:
-            score += 20
+        n = (name or '').lower()
+        if 'midea' in n: score += 100
+        if 'hualing' in n: score += 100
+        if 'air' in n or 'ac' in n: score += 20
         score += max(-100, min(0, int(rssi))) + 100
-        return score
-
-    def _on_scan_device_found(self, address, name, rssi):
-        if not address:
-            return
-
-        score = self._device_score(name, rssi)
-        self.seen_devices[address] = {
-            'address': address,
-            'name': name,
-            'rssi': rssi,
-            'score': score,
-            'advertisData': ''
-        }
-
-        self._log(f'[SCAN] Found {name} {address} RSSI={rssi} score={score}')
-
-        target = None
-        best_score = -10**9
-        for item in self.seen_devices.values():
-            if item['score'] > best_score:
-                best_score = item['score']
-                target = item
-
-        if target and best_score >= 80 and not self.is_connecting and not self.is_connected:
-            self.auto_target_locked = True
-            self.stop_scan()
-            self.connect_to_device(
-                target['address'],
-                target['name'],
-                target.get('advertisData', '')
-            )
-
-    # ------------------------------------------------------------------
-    # GATT (using BleBridge.connectGatt & native BluetoothGatt)
-    # ------------------------------------------------------------------
-    def _next_generation(self):
-        self.connection_generation += 1
-        return self.connection_generation
-
+        self.seen_devices[addr] = {'address':addr,'name':name,'rssi':rssi,'score':score}
+        self._log(f'[SCAN] Found {name} {addr} rssi={rssi} score={score}')
     def connect_to_device(self, address, name='', advertis_data_hex=''):
-        if not address:
-            self._set_status('[GATT] No device address to connect')
-            return
-
-        self.disconnect_gatt(clear_target=False)
+        if self.is_connecting or self.is_connected: return
+        if not address: return
+        self.disconnect_gatt(False)
         self.stop_scan()
-
-        generation = self._next_generation()
         self.is_connecting = True
         self.is_connected = False
         self.gatt_ready = False
@@ -775,34 +720,25 @@ class HualingACApp(App):
         self.handshake_done = False
         self.write_queue.clear()
         self.write_in_progress = False
-
+        self.rx_buffer = b''
         self.current_device_addr = address
         self.current_device_name = name or 'Unknown'
-        self.current_advertis_data = advertis_data_hex or ''
-        self.device_text = f'设备: {self.current_device_name} [{self.current_device_addr}]'
-        self.handshake_text = '握手: 连接中'
-
-        self.gatt_callback = PyGattCallback(self, generation, self.current_device_name)
-
-        self._set_status(f'[GATT] Connecting to {self.current_device_name} {self.current_device_addr} ...')
-
+        self.current_advertis_data = advertis_data_hex
+        self.device_text = f'Device: {self.current_device_name} [{address}]'
+        self.handshake_text = 'Handshake: Connecting'
+        self.connection_generation += 1
+        gen = self.connection_generation
+        self.gatt_callback = PyGattCallback(self, gen, name)
+        self._log(f'[GATT] Connecting to {address}...')
         try:
-            self.gatt = BleBridge.connectGatt(
-                self.context,
-                String(address),
-                False,
-                self.gatt_callback
-            )
+            self.gatt = BleBridge.connectGatt(self.context, String(address), False, self.gatt_callback)
             if not self.gatt:
-                self._set_status(f'[GATT] connectGatt returned null')
                 self.is_connecting = False
                 self.schedule_reconnect()
         except Exception as e:
-            self._set_status(f'[GATT] connect exception: {e}')
-            traceback.print_exc()
+            self._log(f'[GATT] connect error {e}')
             self.is_connecting = False
             self.schedule_reconnect()
-
     def disconnect_gatt(self, clear_target=False):
         self.is_connecting = False
         self.is_connected = False
@@ -812,105 +748,57 @@ class HualingACApp(App):
         self.handshake_done = False
         self.write_queue.clear()
         self.write_in_progress = False
-        self.last_write_tag = ''
-
         self.connection_generation += 1
-
-        if self.handshake_timeout_event is not None:
-            try:
-                self.handshake_timeout_event.cancel()
-            except Exception:
-                pass
+        if self.handshake_timeout_event:
+            self.handshake_timeout_event.cancel()
             self.handshake_timeout_event = None
-
-        if self.gatt is not None:
+        if self.gatt:
             try:
                 self.gatt.disconnect()
                 self.gatt.close()
-            except Exception as e:
-                self._log(f'[GATT] disconnect exception: {e}')
-        self.gatt = None
+            except: pass
+            self.gatt = None
         self.gatt_callback = None
         self.write_char = None
-
         if clear_target:
-            self.current_device = None
-            self.current_device_name = ''
             self.current_device_addr = ''
+            self.current_device_name = ''
             self.current_advertis_data = ''
-            self.device_text = '设备: 未连接'
-        self.handshake_text = '握手: 未开始'
-
+            self.device_text = 'Device: Not Connected'
+        self.handshake_text = 'Handshake: Not Started'
     def schedule_reconnect(self, delay=2.5):
-        if self.is_paused:
-            return
-        if self.auto_reconnect_event is not None:
-            try:
-                self.auto_reconnect_event.cancel()
-            except Exception:
-                pass
+        if self.is_paused: return
+        if self.auto_reconnect_event:
+            self.auto_reconnect_event.cancel()
         self.auto_reconnect_event = Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), delay)
 
-    # --- GATT event handlers ---
-    def _on_gatt_connection_state_change(self, generation, status, newState):
-        if generation != self.connection_generation:
-            return
-
+    def _on_gatt_connection_state_change(self, gen, status, newState):
+        if gen != self.connection_generation: return
         if newState == BluetoothProfile.STATE_CONNECTED and status == 0:
             self.is_connecting = False
             self.is_connected = True
-            self._set_status('[GATT] Connected, waiting services...')
-            self.handshake_text = '握手: 等待服务发现'
-            if self.gatt:
-                self.gatt.discoverServices()
+            self._log('[GATT] Connected')
+            self.handshake_text = 'Handshake: Service Discovery'
+            if self.gatt: self.gatt.discoverServices()
         elif newState == BluetoothProfile.STATE_DISCONNECTED:
-            self._set_status(f'[GATT] Disconnected status={status}')
-            self.is_connecting = False
-            self.is_connected = False
-            self.gatt_ready = False
-            self.control_ready = False
-            self.notification_ready = False
-            self.handshake_done = False
-            self.handshake_text = '握手: 已断开'
-            if self.gatt:
-                try:
-                    self.gatt.close()
-                except Exception:
-                    pass
-            self.gatt = None
-            self.gatt_callback = None
-            self.write_char = None
+            self._log(f'[GATT] Disconnected status={status}')
+            self.disconnect_gatt(False)
             self.schedule_reconnect()
-        else:
-            self._set_status(f'[GATT] state changed status={status} newState={newState}')
-
-    def _on_gatt_services_discovered(self, generation, status):
-        if generation != self.connection_generation:
-            return
-
+    def _on_gatt_services_discovered(self, gen, status):
+        if gen != self.connection_generation: return
         if status != 0:
-            self._set_status(f'[GATT] Services discover failed status={status}')
-            self.disconnect_gatt(clear_target=False)
-            self.schedule_reconnect()
+            self._log(f'[GATT] Service discovery failed {status}')
+            self.disconnect_gatt(False)
             return
-
-        if not self.gatt:
-            return
-
+        if not self.gatt: return
         try:
-            srv_uuid = UUID.fromString(self.MIDEA_SERVICE_UUID)
-            service = self.gatt.getService(srv_uuid)
-            if not service:
-                self._set_status('[GATT] Service FFA0 not found')
-                self.disconnect_gatt(clear_target=False)
+            srv = self.gatt.getService(UUID.fromString(self.MIDEA_SERVICE_UUID))
+            if not srv:
+                self._log('[GATT] FFA0 not found')
+                self.disconnect_gatt(False)
                 return
-
-            write_uuid = UUID.fromString(self.MIDEA_WRITE_UUID)
-            self.write_char = service.getCharacteristic(write_uuid)
-
-            notify_uuid = UUID.fromString(self.MIDEA_NOTIFY_UUID)
-            notify_char = service.getCharacteristic(notify_uuid)
-
+            self.write_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_WRITE_UUID))
+            notify_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_NOTIFY_UUID))
             if notify_char:
                 self.gatt.setCharacteristicNotification(notify_char, True)
                 cccd = notify_char.getDescriptor(UUID.fromString(self.CCCD_UUID))
@@ -918,97 +806,114 @@ class HualingACApp(App):
                     cccd.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                     self.gatt.writeDescriptor(cccd)
                 self.notification_ready = True
-
             self.gatt_ready = True
-            self._set_status('[GATT] Services discovered, notifications enabled')
-            self.device_text = f'设备: {self.current_device_name} [{self.current_device_addr}]  FFA0 ready'
-            self.handshake_text = '握手: 通知已开启，准备发送 c1'
-
-            if self.handshake_timeout_event is not None:
-                try:
-                    self.handshake_timeout_event.cancel()
-                except Exception:
-                    pass
-            self.handshake_timeout_event = Clock.schedule_once(lambda dt: self._on_handshake_timeout(), 10)
-
-            Clock.schedule_once(lambda dt: self.send_security_handshake(), 0.4)
+            self._log('[GATT] Services ready')
+            self.device_text = f'Device: {self.current_device_name} [{self.current_device_addr}]  FFA0 ready'
+            self.handshake_text = 'Handshake: ready to send C1'
+            if not self.current_advertis_data:
+                self._set_status('[ERROR] AdvertisData not set! Use RPC: app.set_advertis_data("hex")')
+                return
+            self.handshake_timeout_event = Clock.schedule_once(lambda dt: self._on_handshake_timeout(), 30)
+            self.protocol.derive_root_key(self.current_advertis_data)
+            self.protocol.create_ec_keypair()
+            self.send_security_handshake()
         except Exception as e:
-            self._set_status(f'[GATT] Service setup error: {e}')
-
+            self._log(f'[GATT] Service setup error {e}')
     def _on_handshake_timeout(self):
         self.handshake_timeout_event = None
         if not self.handshake_done and self.is_connected:
-            self._set_status('[SEC] Handshake timeout, reconnecting...')
-            self.disconnect_gatt(clear_target=False)
-            self.schedule_reconnect(1.5)
-
-    def _on_gatt_characteristic_write(self, generation, status):
-        if generation != self.connection_generation:
-            return
-
+            self._log('[SEC] Handshake timeout')
+            self.disconnect_gatt(False)
+            self.schedule_reconnect()
+    def _on_gatt_characteristic_write(self, gen, status):
+        if gen != self.connection_generation: return
         self.write_in_progress = False
-        self._log(f'[WRITE] write completed status={status} tag={self.last_write_tag}')
-
-        if status != 0:
-            self._set_status(f'[WRITE] Failed status={status} tag={self.last_write_tag}')
-
+        self._log(f'[WRITE] status={status}')
         Clock.schedule_once(lambda dt: self._write_next(), 0)
+    def _on_gatt_characteristic_changed(self, gen, hex_value):
+        if gen != self.connection_generation: return
+        data = from_hex(hex_value)
+        self.rx_buffer += data
+        self._process_rx()
 
-    def _on_gatt_characteristic_changed(self, generation, hex_value):
-        if generation != self.connection_generation:
-            return
-
-        self._log(f'[NOTIFY] <= {hex_value}')
-
-        # 握手完成标记（收到任意通知即认为链路有效）
-        if not self.handshake_done:
-            self.handshake_done = True
-            self.control_ready = True
-            self.handshake_text = '握手: 已完成'
-            self._set_status('[SEC] Handshake marked as done by device notification')
-            if self.handshake_timeout_event is not None:
+    def _process_rx(self):
+        while True:
+            res = self.protocol.parse_conn_frame(self.rx_buffer)
+            if not res:
+                break
+            conn_type, payload, frame_len = res
+            self.rx_buffer = self.rx_buffer[frame_len:]
+            if conn_type == self.protocol.CONN_T2:
                 try:
-                    self.handshake_timeout_event.cancel()
-                except Exception:
-                    pass
-                self.handshake_timeout_event = None
-            Clock.schedule_once(lambda dt: self.send_current_ac_frame(), 0.3)
-            return
+                    sec = self.protocol.decrypt_security_payload(self.protocol.root_key, payload)
+                    cmd = sec[0]
+                    body = sec[3:] if len(sec) > 3 else b''
+                    if cmd == self.protocol.SEC_C1:
+                        self._log('[SEC] Received C1 response')
+                        self._send_c2()
+                    elif cmd == self.protocol.SEC_C2:
+                        self._log(f'[SEC] Received C2, peer_pub={hexstr(body)}')
+                        if len(body) != 64:
+                            self._log('[SEC] Invalid C2 length')
+                            return
+                        self.protocol.derive_session_key(body)
+                        self._send_c3()
+                    elif cmd == self.protocol.SEC_C3:
+                        self._log('[SEC] Received C3 result')
+                        self.handshake_done = True
+                        self.control_ready = True
+                        self.handshake_text = 'Handshake: Completed'
+                        self._set_status('[SEC] Handshake complete')
+                        if self.handshake_timeout_event:
+                            self.handshake_timeout_event.cancel()
+                            self.handshake_timeout_event = None
+                        self.send_current_ac_frame()
+                    else:
+                        self._log(f'[SEC] Unknown cmd {cmd}')
+                except Exception as e:
+                    self._log(f'[SEC] Decrypt error {e}')
+            elif conn_type == self.protocol.CONN_T3:
+                if not self.handshake_done:
+                    return
+                try:
+                    biz = aes_ccm_decrypt(self.protocol.session_key, payload[:8], payload[8:], b'', 8)
+                    self._log(f'[BIZ] Received {hexstr(biz)}')
+                except Exception as e:
+                    self._log(f'[BIZ] Decrypt error {e}')
 
-        # TODO: 解析真实状态上报
+    def _send_c2(self):
+        frame = self.protocol.build_c2_frame()
+        self.queue_frame(frame, 'c2')
+    def _send_c3(self):
+        frame = self.protocol.build_c3_frame(self.protocol.ec_pub_64, self.current_advertis_data)
+        self.queue_frame(frame, 'c3')
+    def send_security_handshake(self, *args):
+        if not self.gatt_ready or not self.write_char: return
+        frame = self.protocol.build_c1_frame()
+        self.queue_frame(frame, 'c1')
+    def send_current_ac_frame(self):
+        if not self.control_ready: return
+        mode_map = {'auto':0x00,'cool':0x01,'dry':0x02,'fan':0x03,'heat':0x04}
+        fan_map = {'auto':0x00,'low':0x01,'medium':0x02,'high':0x03}
+        body = bytes([0x5A,0x0C,0x02,
+                      0x01 if self.desired_power else 0x00,
+                      max(16,min(30,int(self.target_temp))),
+                      mode_map.get(self.desired_mode,0x01),
+                      fan_map.get(self.desired_fan,0x00),
+                      0x00,0x00,0x00,0x00])
+        biz_frame = self.protocol.build_biz_frame(self.protocol.BIZ_TYPE_AC, body)
+        self.queue_frame(biz_frame, 'control')
 
-    # ------------------------------------------------------------------
-    # Write queue (using native BluetoothGatt)
-    # ------------------------------------------------------------------
     def queue_frame(self, frame: bytes, tag=''):
-        if not self.gatt or not self.is_connected or not self.write_char:
-            self._set_status(f'[WRITE] Skip, not connected tag={tag}')
-            return
-        self.write_queue.append((bytes(frame), tag))
+        if not self.gatt or not self.is_connected or not self.write_char: return
+        self.write_queue.append((frame, tag))
         self._write_next()
-
     def _write_next(self):
-        if self.write_in_progress:
-            return
-        if not self.write_queue:
-            return
+        if self.write_in_progress or not self.write_queue: return
         if not self.gatt or not self.is_connected or not self.write_char:
-            self.write_queue.clear()
-            return
-
+            self.write_queue.clear(); return
         frame, tag = self.write_queue.popleft()
-        self.last_write_tag = tag or ''
-
-        # 原生 writeCharacteristic 会自动处理 MTU，但我们仍可手动分片以保证兼容
-        mtu_payload = 20
-        pieces = list(chunked(frame, mtu_payload))
-
-        if len(pieces) > 1:
-            # 将剩余分片重新插回队列头部（按倒序插入保持顺序）
-            for piece in reversed(pieces[1:]):
-                self.write_queue.appendleft((piece, f'{tag} part'))
-            frame = pieces[0]
-
+        self.last_write_tag = tag
         try:
             self.write_in_progress = True
             self.write_char.setValue(frame)
@@ -1016,74 +921,48 @@ class HualingACApp(App):
             self._log(f'[WRITE] => {hexstr(frame)} tag={tag} ok={ok}')
             if not ok:
                 self.write_in_progress = False
-                self._set_status(f'[WRITE] writeCharacteristic returned false tag={tag}')
                 Clock.schedule_once(lambda dt: self._write_next(), 0)
         except Exception as e:
             self.write_in_progress = False
-            self._set_status(f'[WRITE] exception: {e}')
-            traceback.print_exc()
+            self._log(f'[WRITE] error {e}')
 
-    # ------------------------------------------------------------------
-    # Security / control
-    # ------------------------------------------------------------------
-    def send_security_handshake(self, *args):
-        if not self.gatt_ready or not self.is_connected or not self.write_char:
-            self._set_status('[SEC] GATT not ready for handshake')
-            return
+    # RPC functions
+    def set_advertis_data(self, hex_str):
+        self.current_advertis_data = hex_str
+        self._log(f'[RPC] advertisData set to {hex_str}')
+    def rpc_write_hex(self, hex_str):
+        if not self.gatt or not self.is_connected or not self.write_char:
+            self._set_status('[RPC] BLE not connected'); return
+        try:
+            data = bytearray.fromhex(hex_str)
+            self.write_char.setValue(data)
+            ok = self.gatt.writeCharacteristic(self.write_char)
+            self._set_status(f'[RPC] Sent: {hex_str} ok={ok}')
+        except Exception as e:
+            self._set_status(f'[RPC] Error: {e}')
 
-        frame = self.protocol.build_c1_frame(self.current_advertis_data)
-        self.handshake_text = '握手: c1 已发送'
-        self._set_status('[SEC] Sending C1 handshake frame')
-        self.queue_frame(frame, 'handshake_c1')
-
-    def send_current_ac_frame(self):
-        if not self.is_connected or not self.write_char:
-            self._set_status('[CMD] Not connected')
-            return
-
-        frame = self.protocol.build_control_frame(
-            self.desired_power,
-            int(self.target_temp),
-            self.desired_mode,
-            self.desired_fan
-        )
-        self._set_status(
-            f'[Command] Sending: Power:{self.desired_power}, Temp:{int(self.target_temp)}, '
-            f'Mode:{self.desired_mode}, Fan:{self.desired_fan}'
-        )
-        self.queue_frame(frame, 'control')
-
-    # ------------------------------------------------------------------
-    # UI actions
-    # ------------------------------------------------------------------
     def toggle_power(self):
         self.desired_power = not self.desired_power
         self._refresh_control_text()
         self.send_current_ac_frame()
-
     def on_temp_slider(self, value):
         new_temp = int(round(value))
         if new_temp != int(self.target_temp):
             self.target_temp = new_temp
             self._refresh_control_text()
             if self.control_ready:
-                if self.auto_send_event is not None:
-                    try:
-                        self.auto_send_event.cancel()
-                    except Exception:
-                        pass
+                if self.auto_send_event:
+                    self.auto_send_event.cancel()
                 self.auto_send_event = Clock.schedule_once(lambda dt: self.send_current_ac_frame(), 0.25)
-
     def set_mode(self, mode):
         self.desired_mode = mode
         self._refresh_control_text()
         self.send_current_ac_frame()
-
     def set_fan(self, fan):
         self.desired_fan = fan
         self._refresh_control_text()
         self.send_current_ac_frame()
 
-
 if __name__ == '__main__':
-    HualingACApp().run()
+    app = HualingACApp()
+    app.run()

@@ -20,3 +20,17 @@ fatal: fetch-pack: invalid index-pack output
 
 
 cd /workspaces/kivy && latest_apk=$(basename "$(ls -1t bin/*.apk | head -1)") && git add -A && git commit -m "${latest_apk}" && git push 
+
+
+
+buildozer android clean 会完全重新编译太慢了需要30分钟 。
+rm -rf /workspaces/kivy/.buildozer/android/platform/build-arm64-v8a/build/venv
+
+
+因为底层最耗时的 C/Rust 源码编译结果保存在 other_builds 目录下，我们只要避开它，只删掉跟 pip 报错相关的目标安装目录和未完成的独立包分布（Dist）即可。
+
+检查并确认 buildozer.spec 中的 requirements 里已经去掉了 ,android。
+
+rm -rf .buildozer/android/platform/build-arm64-v8a/build/python-installs/hualing
+rm -rf .buildozer/android/platform/build-arm64-v8a/dists/hualing
+直接重新打包
