@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if command -v gradle >/dev/null 2>&1; then
+    exec gradle "$@"
+fi
+
+if [ -x /usr/bin/gradle ]; then
+    exec /usr/bin/gradle "$@"
+fi
+
+echo "Gradle not found. Please install Gradle or add it to PATH before running this project." >&2
+exit 1
