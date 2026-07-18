@@ -4,9 +4,9 @@ package.name = hualing
 package.domain = qgb
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
-icon.filename = icon.bmp
+icon.filename = .icon/icon.bmp
 icon.adaptive_icon_background = #FF0000
-icon.adaptive_icon_foreground = icon.bmp
+icon.adaptive_icon_foreground = .icon/icon.bmp
 version = 0.1
 requirements = hostpython3==3.11.9, python3==3.11.9, kivy, android, able_recipe,pyjnius,pyaes,dill
 # 增加了 INTERNET 权限以允许网络套接字(Socket)运行
