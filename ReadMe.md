@@ -10,7 +10,7 @@ androidBLE 目录 是纯java实现独立apk
 
 
 
-python3 -c "import rpc, io, PIL.Image; bmp_bin = rpc.get_bmp_bytes(rgb=(255,0,100), size=(512,512)); img = PIL.Image.open(io.BytesIO(bmp_bin)); img.save('android_src/splash.png')"
+python3 -c "import rpc, io, PIL.Image; bmp_bin = rpc.get_bmp_bytes(rgb=(67,20,75), size=(90,160)); img = PIL.Image.open(io.BytesIO(bmp_bin)); img.save('android_src/splash.png')"
 
 
 
