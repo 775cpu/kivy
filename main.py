@@ -247,7 +247,13 @@ class PyScanListener(PythonJavaClass):
     @java_method('(Ljava/lang/String;)V')
     def onScanError(self, message):
         msg = str(message) if message else ''
-        Clock.schedule_once(lambda dt: self.owner._on_scan_error(msg), 0)
+        Clock.schedule_once(lambda dt: self.owner._on_scan_error(msg), 0)            
+    @java_method('(Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)V')
+    def onDeviceFoundWithRecord(self, address, name, rssi, recordHex):
+        addr = str(address) if address else ''
+        dev_name = str(name) if name else ''
+        rec = str(recordHex) if recordHex else ''
+        Clock.schedule_once(lambda dt: self.owner._on_scan_device_found(addr, dev_name, int(rssi), rec), 0)
 
 class PyGattCallback(PythonJavaClass):
     __javainterfaces__ = ['org/qgb/ble/GattListener']
@@ -572,8 +578,7 @@ class HualingACApp(App):
     gatt_ready = BooleanProperty(False)
     control_ready = BooleanProperty(False)
     target_temp = NumericProperty(25)
-    # advertis_data_input = StringProperty('AC32323034303535372427308D360D')  # 正序MAC
-    advertis_data_input = StringProperty('AC32323034303535370D368D302724')  #逆序MAC
+    advertis_data_input = StringProperty('AC32323034303535370D368D302724')  # 备用
 
     MIDEA_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
     MIDEA_WRITE_UUID = "0000ffa1-0000-1000-8000-00805f9b34fb"
@@ -598,10 +603,12 @@ class HualingACApp(App):
         self.is_connected = False
         self.notification_ready = False
         self.handshake_done = False
+        self.handshake_started = False
+        self.cccd_retry_count = 0
         self.connection_generation = 0
         self.current_device_addr = ''
         self.current_device_name = ''
-        self.current_advertis_data = self.advertis_data_input
+        self.current_advertis_data = ''
         self.seen_devices = {}
         self.write_queue = deque()
         self.write_in_progress = False
@@ -610,7 +617,7 @@ class HualingACApp(App):
         self.scan_timeout_event = None
         self.handshake_timeout_event = None
         self.c1_timer = None
-        self.step_timer = None          # 替换 c2c3_timer
+        self.step_timer = None
         self.c2_frame = None
         self.c3_frame = None
         self.step_count = 0
@@ -799,30 +806,96 @@ class HualingACApp(App):
         self.stop_scan()
         self.schedule_reconnect()
 
-    def _on_scan_device_found(self, addr, name, rssi):
+    # ---------- 修改后的扫描回调，接收原始广播数据 ----------
+    def _on_scan_device_found(self, addr, name, rssi, record_hex=''):
         if not addr:
             return
         if addr in self.seen_devices:
             return
-        self.seen_devices[addr] = {'name': name, 'rssi': rssi}
-        self._log(f'[SCAN] Found {name} {addr} rssi={rssi}')
+        # 尝试从广播数据中解析正确的 advertisData
+        advertis_data = self._parse_advertis_from_record(record_hex, addr)
+        if not advertis_data:
+            # 解析失败时，回退使用输入框的值（可能错误）
+            advertis_data = self.advertis_data_input.strip()
+            self._log(f'[SCAN] Could not parse advertisData from record, using input: {advertis_data}')
+        self.seen_devices[addr] = {'name': name, 'rssi': rssi, 'advertis': advertis_data}
+        self._log(f'[SCAN] Found {name} {addr} rssi={rssi} advertis={advertis_data}')
         container = self.root_widget.ids.device_container
         item = DeviceItem(name, addr, self.on_device_connect)
         container.add_widget(item)
 
+    # ---------- 广播数据解析方法 ----------
+    def _parse_advertis_from_record(self, record_hex, mac_address):
+        """从广播原始数据中提取美的空调的 advertisData (AC + SN8 + 逆序MAC)"""
+        if not record_hex:
+            return None
+        try:
+            data = bytes.fromhex(record_hex)
+        except Exception:
+            return None
+
+        # 遍历广播包，寻找 Manufacturer Specific Data (AD type = 0xFF)
+        i = 0
+        while i < len(data) - 1:
+            length = data[i]
+            if length == 0 or i + length >= len(data):
+                break
+            ad_type = data[i+1]
+            if ad_type == 0xFF:  # Manufacturer Specific Data
+                payload = data[i+2 : i+1+length]
+                # 美的公司 ID 为 0x06A8 (小端字节序: A8 06)
+                if len(payload) >= 2 and payload[0:2] == b'\xA8\x06':
+                    manu_data = payload[2:]   # 跳过公司 ID
+                    # 根据文档，美的自定义数据格式：[01][SN14][01 03 00 32][MAC6][00]
+                    if len(manu_data) >= 9:
+                        # SN14 开始于 manu_data[1] 并取14字节 ASCII
+                        sn14_bytes = manu_data[1:15]
+                        sn14 = sn14_bytes.decode('ascii', errors='ignore')
+                        if len(sn14) == 14:
+                            sn8 = sn14[:8]   # 取前8位作为 SN8
+                            # MAC 位于 manu_data[19:25] 并需要逆序
+                            if len(manu_data) >= 25:
+                                mac_bytes = manu_data[19:25]
+                                mac_rev = bytes(reversed(mac_bytes))
+                                advertis = b'\xAC' + sn8.encode('ascii') + mac_rev
+                                return advertis.hex().upper()
+                        # 如果 SN14 不是14字节，尝试直接取 manu_data[2:10] 作为 SN8
+                        if len(manu_data) >= 10:
+                            sn8_bytes = manu_data[2:10]
+                            try:
+                                sn8 = sn8_bytes.decode('ascii')
+                                if len(sn8) == 8 and sn8.isalnum():
+                                    mac_clean = mac_address.replace(':', '')
+                                    mac_bytes = bytes.fromhex(mac_clean)
+                                    mac_rev = bytes(reversed(mac_bytes))
+                                    advertis = b'\xAC' + sn8.encode('ascii') + mac_rev
+                                    return advertis.hex().upper()
+                            except Exception:
+                                pass
+                    # 未解析成功，记录原始数据以便调试
+                    self._log(f'[SCAN] Manu data hex: {manu_data.hex()}')
+                break
+            i += (length + 1)
+
+        return None
+
     def on_device_connect(self, mac_addr):
         self._log(f'[UI] Connect pressed for {mac_addr}')
-        self.current_advertis_data = self.advertis_data_input.strip()
+        dev_info = self.seen_devices.get(mac_addr, {})
+        advertis_data = dev_info.get('advertis')
+        if not advertis_data:
+            # 如果解析失败，回退使用输入框里的值
+            advertis_data = self.advertis_data_input.strip()
+        self.current_advertis_data = advertis_data
         if not self.current_advertis_data:
             self._set_status('[ERROR] advertisData not set!')
             return
-        name = self.seen_devices.get(mac_addr, {}).get('name', '')
+        name = dev_info.get('name', '')
         self.connect_to_device(mac_addr, name, self.current_advertis_data)
 
     def connect_to_device(self, address, name='', advertis_data_hex=''):
         self._log(f'[UI] connect_to_device {address} ({name}) advertisData: {advertis_data_hex}')
         if self.is_connecting or self.is_connected:
-            # 存在进行中的连接，先断开再延迟重试
             self.disconnect_gatt(False)
             Clock.schedule_once(lambda dt: self.connect_to_device(address, name, advertis_data_hex), 0.6)
             return
@@ -836,6 +909,8 @@ class HualingACApp(App):
         self.control_ready = False
         self.notification_ready = False
         self.handshake_done = False
+        self.handshake_started = False
+        self.cccd_retry_count = 0
         self.write_queue.clear()
         self.write_in_progress = False
         self.rx_buffer = b''
@@ -865,6 +940,8 @@ class HualingACApp(App):
         self.control_ready = False
         self.notification_ready = False
         self.handshake_done = False
+        self.handshake_started = False
+        self.cccd_retry_count = 0
         self.write_queue.clear()
         self.write_in_progress = False
         self.connection_generation += 1
@@ -948,23 +1025,36 @@ class HualingACApp(App):
 
             self.write_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_WRITE_UUID))
             if self.write_char:
-                self.write_char.setWriteType(2)  # WRITE_TYPE_DEFAULT
+                self.write_char.setWriteType(2)
 
             notify_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_NOTIFY_UUID))
             if notify_char:
+                props = notify_char.getProperties()
+                self._log(f'[GATT] Notify char properties: {props}')
+                can_notify = (props & 0x10) != 0
+                can_indicate = (props & 0x20) != 0
+                if not can_notify and not can_indicate:
+                    self._log('[GATT] FFA2 does not support notify/indicate, aborting')
+                    self.disconnect_gatt(False)
+                    return
+
                 self.gatt.setCharacteristicNotification(notify_char, True)
                 cccd = notify_char.getDescriptor(UUID.fromString(self.CCCD_UUID))
                 if cccd:
-                    cccd.setValue(b'\x01\x00')  # Notification
+                    if can_notify:
+                        enable_val = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    else:
+                        enable_val = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                    cccd.setValue(enable_val)
+                    self._log(f'[GATT] Writing CCCD with value: {enable_val[0]:02X} {enable_val[1]:02X}')
                     ok = self.gatt.writeDescriptor(cccd)
-                    self._log(f'[GATT] writeDescriptor (0x0003) returned: {ok}')
+                    self._log(f'[GATT] writeDescriptor returned: {ok}')
                     if not ok:
-                        cccd.setValue(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
-                        ok = self.gatt.writeDescriptor(cccd)
-                        self._log(f'[GATT] writeDescriptor (Indication) returned: {ok}')
-                    if not ok:
-                        Clock.schedule_once(lambda dt, d=cccd: self._retry_write_descriptor(d), 0.3)
-                self.notification_ready = True
+                        Clock.schedule_once(lambda dt, d=cccd, v=enable_val: self._retry_write_descriptor(d, v), 0.3)
+                else:
+                    self._log('[GATT] CCCD descriptor not found')
+            else:
+                self._log('[GATT] Notify characteristic not found')
 
             self.gatt_ready = True
             self._log('[GATT] Services ready')
@@ -977,22 +1067,57 @@ class HualingACApp(App):
 
             self.protocol.derive_root_key(self.current_advertis_data)
             self.protocol.create_ec_keypair()
-            # 等待通知通道稳定，再开始握手
-            Clock.schedule_once(lambda dt: self._start_handshake(), 0.8)
+            self.handshake_started = False
 
         except Exception as e:
             self._log(f'[GATT] Service setup error {e}')
 
-    def _retry_write_descriptor(self, cccd):
+    def _retry_write_descriptor(self, cccd, value):
         if not self.gatt:
             return
         try:
+            cccd.setValue(value)
             ok = self.gatt.writeDescriptor(cccd)
             self._log(f'[GATT] retry writeDescriptor returned: {ok}')
         except Exception as e:
             self._log(f'[GATT] retry writeDescriptor error: {e}')
 
-    # ---------- 握手状态机 (修复版) ----------
+    def _on_gatt_descriptor_write(self, gen, status):
+        if gen != self.connection_generation:
+            return
+        self._log(f'[GATT] onDescriptorWrite status={status}')
+        if status == 0:
+            self.notification_ready = True
+            self._log('[GATT] Notification truly enabled')
+            if not self.handshake_started:
+                self._start_handshake()
+                self.handshake_started = True
+        else:
+            self.cccd_retry_count += 1
+            self._log(f'[GATT] CCCD write failed (attempt {self.cccd_retry_count})')
+            if self.cccd_retry_count >= 3:
+                self._log('[GATT] Too many CCCD failures, disconnecting')
+                self.disconnect_gatt(False)
+                return
+            if self.gatt:
+                try:
+                    srv = self.gatt.getService(UUID.fromString(self.MIDEA_SERVICE_UUID))
+                    if srv:
+                        notify_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_NOTIFY_UUID))
+                        if notify_char:
+                            cccd = notify_char.getDescriptor(UUID.fromString(self.CCCD_UUID))
+                            if cccd:
+                                if self.cccd_retry_count == 1:
+                                    new_val = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                                else:
+                                    new_val = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                cccd.setValue(new_val)
+                                self.gatt.writeDescriptor(cccd)
+                                self._log(f'[GATT] Retrying CCCD with value: {new_val[0]:02X} {new_val[1]:02X}')
+                except Exception as e:
+                    self._log(f'[GATT] Retry CCCD error: {e}')
+
+    # ---------- 握手状态机 ----------
     def _start_handshake(self):
         if not self.gatt_ready or not self.write_char:
             return
@@ -1005,7 +1130,7 @@ class HualingACApp(App):
     def _send_c1(self):
         if not self.gatt_ready or not self.write_char or self.hs_state != 'c1_wait':
             return
-        frame = self.protocol.build_c1_frame()          # 每次重发都是全新帧
+        frame = self.protocol.build_c1_frame()
         self.queue_frame(frame, 'c1')
         self.c1_count += 1
         self._log(f'[SEC] Sent C1 #{self.c1_count}')
@@ -1023,7 +1148,6 @@ class HualingACApp(App):
             self.disconnect_gatt(False)
             self.schedule_reconnect()
             return
-        # 清空可能残留的写请求，重发全新 C1
         self.write_queue.clear()
         self._send_c1()
         self._schedule_c1_retry()
@@ -1031,7 +1155,7 @@ class HualingACApp(App):
     def _send_c2(self):
         if not self.gatt_ready or not self.write_char or self.hs_state != 'c2_wait':
             return
-        self.c2_frame = self.protocol.build_c2_frame()   # 保存帧，后续重发用同一帧
+        self.c2_frame = self.protocol.build_c2_frame()
         self.queue_frame(self.c2_frame, 'c2')
         self.step_count = 0
         self._log('[SEC] Sent C2')
@@ -1080,10 +1204,8 @@ class HualingACApp(App):
         self.write_in_progress = False
         self._log(f'[WRITE] status={status}')
         if status != 0:
-            self._log('[WRITE] Error, clearing queue and reconnecting')
-            self.write_queue.clear()
-            self.disconnect_gatt(False)
-            self.schedule_reconnect()
+            self._log(f'[WRITE] status={status} (ignored, keep alive)')
+            Clock.schedule_once(lambda dt: self._write_next(), 0.1)
             return
         Clock.schedule_once(lambda dt: self._write_next(), 0)
 
@@ -1246,7 +1368,6 @@ class HualingACApp(App):
         self.desired_state['fan'] = fan
         self._refresh_control_text()
         self.send_control_frame()
-
 
 if __name__=='__main__':
     app=HualingACApp()
