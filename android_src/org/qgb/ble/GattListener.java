@@ -5,4 +5,5 @@ public interface GattListener {
     void onServicesDiscovered(int status);
     void onCharacteristicWrite(int status);
     void onCharacteristicChanged(byte[] value);
+    void onDescriptorWrite(int status);   // 新增
 }

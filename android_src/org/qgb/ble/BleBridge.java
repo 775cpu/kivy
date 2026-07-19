@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;   // 新增导入
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
@@ -15,6 +16,7 @@ import java.util.List;
 public final class BleBridge {
     private BleBridge() {
     }
+
     public static final class ScanSession {
         private final BluetoothLeScanner scanner;
         private final ScanCallback callback;
@@ -176,6 +178,14 @@ public final class BleBridge {
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
             if (listener != null && characteristic != null) {
                 listener.onCharacteristicChanged(characteristic.getValue());
+            }
+        }
+
+        // ---------- 新增 ----------
+        @Override
+        public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            if (listener != null) {
+                listener.onDescriptorWrite(status);
             }
         }
     }

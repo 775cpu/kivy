@@ -257,20 +257,25 @@ class PyGattCallback(PythonJavaClass):
         self.owner = owner
         self.generation = generation
         self.device_name = device_name
+
     def _valid(self):
         return self.owner and self.generation == self.owner.connection_generation
+
     @java_method('(II)V')
     def onConnectionStateChange(self, status, newState):
         Clock.schedule_once(lambda dt: self.owner._on_gatt_connection_state_change(
             self.generation, int(status), int(newState)), 0)
+
     @java_method('(I)V')
     def onServicesDiscovered(self, status):
         Clock.schedule_once(lambda dt: self.owner._on_gatt_services_discovered(
             self.generation, int(status)), 0)
+
     @java_method('(I)V')
     def onCharacteristicWrite(self, status):
         Clock.schedule_once(lambda dt: self.owner._on_gatt_characteristic_write(
             self.generation, int(status)), 0)
+
     @java_method('([B)V')
     def onCharacteristicChanged(self, value):
         if value:
@@ -281,6 +286,12 @@ class PyGattCallback(PythonJavaClass):
         Clock.schedule_once(lambda dt: self.owner._on_gatt_characteristic_changed(
             self.generation, hex_data), 0)
 
+    # ---------- 新增：接收 onDescriptorWrite 回调 ----------
+    @java_method('(I)V')
+    def onDescriptorWrite(self, status):
+        Clock.schedule_once(lambda dt: self.owner._on_gatt_descriptor_write(
+            self.generation, int(status)), 0)
+            
 # ---------- Crypto helpers ----------
 def hexstr(data): return data.hex().upper()
 def from_hex(s):
@@ -561,7 +572,8 @@ class HualingACApp(App):
     gatt_ready = BooleanProperty(False)
     control_ready = BooleanProperty(False)
     target_temp = NumericProperty(25)
-    advertis_data_input = StringProperty('AC32323034303535372427308D360D')  # 正序MAC
+    # advertis_data_input = StringProperty('AC32323034303535372427308D360D')  # 正序MAC
+    advertis_data_input = StringProperty('AC32323034303535370D368D302724')  #逆序MAC
 
     MIDEA_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
     MIDEA_WRITE_UUID = "0000ffa1-0000-1000-8000-00805f9b34fb"
