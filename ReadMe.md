@@ -37,3 +37,65 @@ rm -rf /workspaces/kivy/.buildozer/android/platform/build-arm64-v8a/build/venv
 rm -rf .buildozer/android/platform/build-arm64-v8a/build/python-installs/hualing
 rm -rf .buildozer/android/platform/build-arm64-v8a/dists/hualing
 直接重新打包
+
+
+
+
+
+import os,zipfile
+from PIL import Image
+
+def get_img_status(img_path, target_rgb, is_file_obj=False):
+    try:
+        with Image.open(img_path) as img:
+            img = img.convert('RGBA')
+            w, h = img.size
+            center_pixel = img.getpixel((w // 2, h // 2))
+            center_rgb = center_pixel[:3]
+            
+            if center_rgb == target_rgb:
+                status = "✅ 完美匹配"
+            elif center_rgb == (79, 97, 119):
+                status = "❌ 顽固残留(灰蓝)"
+            else:
+                status = f"⚠️ 未知颜色{center_rgb}"
+            return f"{w}x{h}".ljust(9), f"RGBA{center_pixel}".ljust(22), status
+    except Exception as e:
+        return "未知".ljust(9), "读取失败".ljust(22), f"⚠️ 错误: {e}"
+
+def run_density_check(apk_path, local_dir, target_rgb=(11, 22, 100)):
+    print(f"\n{'='*35} 🛠️ 1. 本地源图片检测 (android_src) {'='*35}")
+    if os.path.exists(local_dir):
+        for root, _, files in os.walk(local_dir):
+            for f in files:
+                if f.endswith(('.png', '.jpg', '.jpeg')):
+                    full_path = os.path.join(root, f)
+                    rel_path = os.path.relpath(full_path, local_dir)
+                    res, rgba, status = get_img_status(full_path, target_rgb)
+                    print(f"🏠 [本地] {rel_path.ljust(45)} | 尺寸: {res} | 中心: {rgba} | 状态: {status}")
+    else:
+        print(f"❌ 未找到本地目录: {local_dir}")
+
+    print(f"\n{'='*35} 📦 2. 编译产物检测 (APK 内部资源) {'='*35}")
+    if os.path.exists(apk_path):
+        total, matched = 0, 0
+        with zipfile.ZipFile(apk_path, 'r') as z:
+            for name in z.namelist():
+                # 过滤出所有可能包含开屏、背景、图标的 res 资源
+                if name.endswith('.png') and ('res/drawable' in name or 'res/mipmap' in name):
+                    with z.open(name) as f:
+                        res, rgba, status = get_img_status(f, target_rgb)
+                        total += 1
+                        if "✅" in status: matched += 1
+                        print(f"🤖 [APK ] {name.ljust(45)} | 尺寸: {res} | 中心: {rgba} | 状态: {status}")
+        print(f"\n📊 报告结论：扫描到 APK 相关图片 {total} 张，成功替换目标色 {matched} 张 (达成率: {matched}/{total})")
+    else:
+        print(f"❌ 未找到待测 APK 文件: {apk_path}，请先执行 buildozer android debug 编译。")
+    print('='*100)
+
+# 执行双向高密度检测
+run_density_check(
+    apk_path="bin/hualing-0.1-arm64-v8a-debug.apk", 
+    local_dir="/workspaces/kivy/android_src", 
+    target_rgb=(11, 22, 100)
+)
