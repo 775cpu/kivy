@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanRecord;
@@ -104,7 +105,6 @@ public final class BleBridge {
                         name = "Unknown Device";
                     }
 
-                    // 获取完整广播数据并转换成十六进制字符串
                     ScanRecord record = result.getScanRecord();
                     String recordHex = "";
                     if (record != null) {
@@ -117,13 +117,11 @@ public final class BleBridge {
                     }
 
                     try {
-                        // 优先调用新方法，传递完整广播数据
                         listener.onDeviceFoundWithRecord(address, name, result.getRssi(), recordHex);
                     } catch (Throwable ignored) {
                     }
 
                     try {
-                        // 保留旧回调，兼容不支持新方法的实现
                         listener.onDeviceFound(address, name, result.getRssi());
                     } catch (Throwable ignored) {
                     }
@@ -140,7 +138,7 @@ public final class BleBridge {
         }
     }
 
-    public static BluetoothGatt connectGatt(Context context, String macAddress, boolean autoConnect, GattListener listener) {
+    public static BluetoothGatt connectGatt(Context context, String macAddress, boolean autoConnect, int targetMtu, GattListener listener) {
         if (context == null || listener == null || macAddress == null) {
             return null;
         }
@@ -157,7 +155,8 @@ public final class BleBridge {
             if (device == null) {
                 return null;
             }
-            return device.connectGatt(context, autoConnect, new DelegateGattCallback(listener));
+            // 传入 targetMtu
+            return device.connectGatt(context, autoConnect, new DelegateGattCallback(listener, targetMtu));
         } catch (IllegalArgumentException exception) {
             return null;
         } catch (SecurityException exception) {
@@ -169,15 +168,28 @@ public final class BleBridge {
 
     private static class DelegateGattCallback extends BluetoothGattCallback {
         private final GattListener listener;
+        private final int targetMtu;
 
-        DelegateGattCallback(GattListener listener) {
+        DelegateGattCallback(GattListener listener, int targetMtu) {
             this.listener = listener;
+            this.targetMtu = targetMtu;
         }
 
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+            // 在连接成功后立刻执行 MTU 协商
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                gatt.requestMtu(targetMtu);
+            }
             if (listener != null) {
                 listener.onConnectionStateChange(status, newState);
+            }
+        }
+
+        @Override
+        public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
+            if (listener != null) {
+                listener.onMtuChanged(mtu, status);
             }
         }
 
