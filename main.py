@@ -924,7 +924,7 @@ class HualingACApp(App):
         self.gatt_callback = PyGattCallback(self, gen, name)
         self._log(f'[GATT] Connecting to {address}...')
         try:
-            self.gatt = BleBridge.connectGatt(self.context, String(address), False, self.gatt_callback)
+            self.gatt = BleBridge.connectGatt(self.context, String(address), False, 512, self.gatt_callback)
             if not self.gatt:
                 self.is_connecting = False
                 self.schedule_reconnect()
