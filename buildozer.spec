@@ -4,14 +4,14 @@ package.name = hualing
 package.domain = qgb
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
-icon.filename = .icon/icon.bmp
-icon.adaptive_icon_background = #FF0000
-icon.adaptive_icon_foreground = .icon/icon.bmp
+icon.filename = android_src/splash.png
+icon.adaptive_icon_background = #ff000014
+icon.adaptive_icon_foreground = android_src/splash.png
 
 # 自定义开屏图片
-android.splash_image = .icon/icon.bmp
+android.splash_image = android_src/splash.png
 # 启动图背景色（不填默认黑色，和图片底色匹配更美观）
-android.splash_color = #FF0000
+android.splash_color = #ff000014
 # 是否隐藏默认Kivy文字水印（必须加，否则底部显示Powered by Kivy）
 android.splash_remove_label = True
 # 全屏启动图，和你fullscreen=1匹配
