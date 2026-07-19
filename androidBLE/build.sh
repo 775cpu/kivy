@@ -3,21 +3,42 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if command -v gradle >/dev/null 2>&1; then
+if [ -z "${ANDROID_HOME:-}" ]; then
+    if [ -d "/home/vscode/.buildozer/android/platform/android-sdk" ]; then
+        export ANDROID_HOME="/home/vscode/.buildozer/android/platform/android-sdk"
+    elif [ -d "/workspaces/kivy/.buildozer/android/platform/android-sdk" ]; then
+        export ANDROID_HOME="/workspaces/kivy/.buildozer/android/platform/android-sdk"
+    fi
+fi
+
+if [ -z "${ANDROID_SDK_ROOT:-}" ] && [ -n "${ANDROID_HOME:-}" ]; then
+    export ANDROID_SDK_ROOT="$ANDROID_HOME"
+fi
+
+if [ -z "${JAVA_HOME:-}" ]; then
+    if [ -d "/usr/lib/jvm/java-17-openjdk-amd64" ]; then
+        export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+    fi
+fi
+
+if [ -n "${ANDROID_HOME:-}" ]; then
+    export PATH="$ANDROID_HOME/platform-tools:$PATH"
+fi
+
+if [ -x "/workspaces/kivy/.buildozer/android/platform/build-arm64-v8a/build/bootstrap_builds/sdl2/gradlew" ]; then
+    GRADLE_CMD="/workspaces/kivy/.buildozer/android/platform/build-arm64-v8a/build/bootstrap_builds/sdl2/gradlew"
+elif command -v gradle >/dev/null 2>&1; then
     GRADLE_CMD="gradle"
 elif [ -x "$PWD/gradlew" ]; then
     GRADLE_CMD="$PWD/gradlew"
 else
-    echo "未找到 Gradle。请先安装 Gradle 或者在当前环境中配置 PATH。"
-    echo "可尝试：sudo apt update && sudo apt install -y gradle"
+    echo "未找到可用的 Gradle。"
     exit 1
 fi
 
-if [ "$GRADLE_CMD" = "$PWD/gradlew" ]; then
-    "$GRADLE_CMD" :app:assembleDebug
-else
-    "$GRADLE_CMD" :app:assembleDebug
-fi
+echo "使用 Android SDK: ${ANDROID_HOME:-未设置}"
+echo "使用 Java: ${JAVA_HOME:-未设置}"
+"$GRADLE_CMD" :app:assembleDebug
 
 OUT_DIR="$PWD/app/build/outputs/apk/debug"
 APK_PATH="$(find "$OUT_DIR" -maxdepth 1 -type f -name '*.apk' | head -n 1)"

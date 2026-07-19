@@ -16,3 +16,7 @@ bash build.sh
 ## 说明
 
 当前项目不修改原有的 Python/Kivy 代码。
+
+
+gradle 在
+/home/vscode/.buildozer/ 和 /workspaces/kivy/.buildozer 中没有吗，搜索文件，不要重新安装

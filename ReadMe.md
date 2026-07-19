@@ -1,7 +1,8 @@
-buildozer命令找不到
+第一次打开codespaces buildozer命令找不到
 ctrl+shift+p  rebuild 大概5分钟
 
-./build.sh 第一次至少半个小时 [1500d\多秒]
+./build.sh 第一次至少半个小时  [已用时: 1949s] 
+buildozer android clean 后重新./build.sh [1500多秒]
 
 
 androidBLE 目录 是纯java实现独立apk
