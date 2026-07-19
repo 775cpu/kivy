@@ -41,6 +41,27 @@ rm -rf .buildozer/android/platform/build-arm64-v8a/dists/hualing
 
 
 
+独立图片文件（SDL 默认灰蓝色图标，4 张）
+ic_launcher...（mdpi 小尺寸 SDL 标）
+ic_launcher...（hdpi 中尺寸 SDL 标）
+ic_launcher...（xhdpi 大尺寸 SDL 标）
+ic_launcher...（xxhdpi 超大尺寸 SDL 标）
+这四张就是检测报告里❌ 顽固残留灰蓝图，对应 4 个分辨率 drawable 旧图标，编译自动生成，不受本地 android_src 覆盖。
+独立深蓝色自定义图片（3 张，你目标色 (11,22,100)，全部正常替换）
+icon.png：自适应图标主图
+icon_backgr... → icon_background.png 自适应图标背景层
+icon_foregr... → icon_foreground.png 自适应图标前景层
+这三张存放在res/mipmap内，spec 自适应图标参数已完美生效，桌面图标显示正常。
+
+apk\res\drawable-hdpi-v4\ic_launcher.png
+apk\res\drawable-mdpi-v4\ic_launcher.png
+apk\res\drawable-xhdpi-v4\ic_launcher.png
+apk\res\drawable-xxhdpi-v4\ic_launcher.png  python-for-android (p4a) 在其 SDL2 bootstrap 模板中内置的默认图标资源。
+
+这就是为什么它如此“顽固”的原因：
+它不是你项目代码库中的文件，而是被封装在 p4a 预编译的二进制模板库里。当你执行 buildozer android debug 时，构建工具会自动将这套默认图标集注入到 res/drawable-xxhdpi/ 等目录下。由于它是作为“模板默认值”存在的，如果不强制替换掉构建环境中的那个 .png 源文件，它就会在每次构建时覆盖你的自定义资源
+
+
 
 import os,zipfile
 from PIL import Image
