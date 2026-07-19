@@ -284,6 +284,7 @@ class PyGattCallback(PythonJavaClass):
 
     @java_method('([B)V')
     def onCharacteristicChanged(self, value):
+        print(f"onCharacteristicChanged {bytes(value).hex()}")#'jnius.ByteArray' object has no attribute 'hex'
         if value:
             unsigned = [b & 0xFF for b in value]
             hex_data = bytes(unsigned).hex().upper()
@@ -297,6 +298,9 @@ class PyGattCallback(PythonJavaClass):
     def onDescriptorWrite(self, status):
         Clock.schedule_once(lambda dt: self.owner._on_gatt_descriptor_write(
             self.generation, int(status)), 0)
+    @java_method('(II)V')
+    def onMtuChanged(self, mtu, status):
+        Clock.schedule_once(lambda dt: self.owner._on_gatt_mtu_changed(self.generation, int(mtu), int(status)), 0)        
             
 # ---------- Crypto helpers ----------
 def hexstr(data): return data.hex().upper()
@@ -578,7 +582,9 @@ class HualingACApp(App):
     gatt_ready = BooleanProperty(False)
     control_ready = BooleanProperty(False)
     target_temp = NumericProperty(25)
-    advertis_data_input = StringProperty('AC32323034303535370D368D302724')  # 备用
+    # advertis_data_input=StringProperty('AC32323034303535370D368D302724')  # 备用
+    # advertis_data_input = StringProperty('AC32323034303035372427308D360D')  # 正序
+    advertis_data_input = StringProperty('AC32323034303035370D368D302724')  # 逆序
 
     MIDEA_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
     MIDEA_WRITE_UUID = "0000ffa1-0000-1000-8000-00805f9b34fb"
@@ -605,6 +611,8 @@ class HualingACApp(App):
         self.handshake_done = False
         self.handshake_started = False
         self.cccd_retry_count = 0
+        self.mtu_negotiated = False          # MTU 协商状态
+        self.mtu_failed = False
         self.connection_generation = 0
         self.current_device_addr = ''
         self.current_device_name = ''
@@ -808,14 +816,13 @@ class HualingACApp(App):
 
     # ---------- 修改后的扫描回调，接收原始广播数据 ----------
     def _on_scan_device_found(self, addr, name, rssi, record_hex=''):
+        print(f"_on_scan_device_found {addr} {name} {rssi} {record_hex}")
         if not addr:
             return
         if addr in self.seen_devices:
             return
-        # 尝试从广播数据中解析正确的 advertisData
         advertis_data = self._parse_advertis_from_record(record_hex, addr)
         if not advertis_data:
-            # 解析失败时，回退使用输入框的值（可能错误）
             advertis_data = self.advertis_data_input.strip()
             self._log(f'[SCAN] Could not parse advertisData from record, using input: {advertis_data}')
         self.seen_devices[addr] = {'name': name, 'rssi': rssi, 'advertis': advertis_data}
@@ -826,40 +833,32 @@ class HualingACApp(App):
 
     # ---------- 广播数据解析方法 ----------
     def _parse_advertis_from_record(self, record_hex, mac_address):
-        """从广播原始数据中提取美的空调的 advertisData (AC + SN8 + 逆序MAC)"""
         if not record_hex:
             return None
         try:
             data = bytes.fromhex(record_hex)
         except Exception:
             return None
-
-        # 遍历广播包，寻找 Manufacturer Specific Data (AD type = 0xFF)
         i = 0
         while i < len(data) - 1:
             length = data[i]
             if length == 0 or i + length >= len(data):
                 break
             ad_type = data[i+1]
-            if ad_type == 0xFF:  # Manufacturer Specific Data
+            if ad_type == 0xFF:
                 payload = data[i+2 : i+1+length]
-                # 美的公司 ID 为 0x06A8 (小端字节序: A8 06)
                 if len(payload) >= 2 and payload[0:2] == b'\xA8\x06':
-                    manu_data = payload[2:]   # 跳过公司 ID
-                    # 根据文档，美的自定义数据格式：[01][SN14][01 03 00 32][MAC6][00]
+                    manu_data = payload[2:]
                     if len(manu_data) >= 9:
-                        # SN14 开始于 manu_data[1] 并取14字节 ASCII
                         sn14_bytes = manu_data[1:15]
                         sn14 = sn14_bytes.decode('ascii', errors='ignore')
                         if len(sn14) == 14:
-                            sn8 = sn14[:8]   # 取前8位作为 SN8
-                            # MAC 位于 manu_data[19:25] 并需要逆序
+                            sn8 = sn14[:8]
                             if len(manu_data) >= 25:
                                 mac_bytes = manu_data[19:25]
                                 mac_rev = bytes(reversed(mac_bytes))
                                 advertis = b'\xAC' + sn8.encode('ascii') + mac_rev
                                 return advertis.hex().upper()
-                        # 如果 SN14 不是14字节，尝试直接取 manu_data[2:10] 作为 SN8
                         if len(manu_data) >= 10:
                             sn8_bytes = manu_data[2:10]
                             try:
@@ -872,20 +871,22 @@ class HualingACApp(App):
                                     return advertis.hex().upper()
                             except Exception:
                                 pass
-                    # 未解析成功，记录原始数据以便调试
                     self._log(f'[SCAN] Manu data hex: {manu_data.hex()}')
                 break
             i += (length + 1)
-
         return None
 
     def on_device_connect(self, mac_addr):
         self._log(f'[UI] Connect pressed for {mac_addr}')
+        # 优先使用手动输入的值（如果与自动解析的不同）
+        manual_ad = self.advertis_data_input.strip()
         dev_info = self.seen_devices.get(mac_addr, {})
-        advertis_data = dev_info.get('advertis')
-        if not advertis_data:
-            # 如果解析失败，回退使用输入框里的值
-            advertis_data = self.advertis_data_input.strip()
+        auto_ad = dev_info.get('advertis', '')
+        if manual_ad and manual_ad != auto_ad:
+            advertis_data = manual_ad
+            self._log(f'[UI] Using manually set advertisData: {advertis_data}')
+        else:
+            advertis_data = auto_ad if auto_ad else manual_ad
         self.current_advertis_data = advertis_data
         if not self.current_advertis_data:
             self._set_status('[ERROR] advertisData not set!')
@@ -911,6 +912,8 @@ class HualingACApp(App):
         self.handshake_done = False
         self.handshake_started = False
         self.cccd_retry_count = 0
+        self.mtu_negotiated = False
+        self.mtu_failed = False
         self.write_queue.clear()
         self.write_in_progress = False
         self.rx_buffer = b''
@@ -942,6 +945,8 @@ class HualingACApp(App):
         self.handshake_done = False
         self.handshake_started = False
         self.cccd_retry_count = 0
+        self.mtu_negotiated = False
+        self.mtu_failed = False
         self.write_queue.clear()
         self.write_in_progress = False
         self.connection_generation += 1
@@ -980,19 +985,37 @@ class HualingACApp(App):
         self.auto_reconnect_event = Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), delay)
 
     # ---------- GATT 事件处理 ----------
+    def _on_gatt_mtu_changed(self, gen, mtu, status):
+        if gen != self.connection_generation:
+            return
+        self._log(f'[GATT] MTU changed: mtu={mtu} status={status}')
+        if status == 0:
+            self.mtu_negotiated = True
+            self._log('[GATT] MTU negotiated, starting service discovery...')
+            self.handshake_text = 'Handshake: Service Discovery'
+            if self.gatt:
+                self.gatt.discoverServices()
+                self._service_discovery_timeout = Clock.schedule_once(
+                    lambda dt: self._on_service_discovery_timeout(), 10.0)
+        else:
+            self.mtu_failed = True
+            self._log('[GATT] MTU negotiation failed, trying service discovery anyway')
+            if self.gatt:
+                self.gatt.discoverServices()
+                self._service_discovery_timeout = Clock.schedule_once(
+                    lambda dt: self._on_service_discovery_timeout(), 10.0)
+
     def _on_gatt_connection_state_change(self, gen, status, newState):
         if gen != self.connection_generation:
             return
         if newState == BluetoothProfile.STATE_CONNECTED and status == 0:
             self.is_connecting = False
             self.is_connected = True
-            self._log('[GATT] Connected')
-            self.handshake_text = 'Handshake: Service Discovery'
-            if self.gatt:
-                self._log('[GATT] Starting service discovery...')
-                self.gatt.discoverServices()
-                self._service_discovery_timeout = Clock.schedule_once(
-                    lambda dt: self._on_service_discovery_timeout(), 10.0)
+            self.mtu_negotiated = False
+            self.mtu_failed = False
+            self._log('[GATT] Connected, waiting for MTU negotiation...')
+            self.handshake_text = 'Handshake: MTU negotiating'
+            # 不再立即发现服务，由 _on_gatt_mtu_changed 触发
         elif newState == BluetoothProfile.STATE_DISCONNECTED:
             self._log(f'[GATT] Disconnected status={status}')
             self.disconnect_gatt(False)
@@ -1121,6 +1144,9 @@ class HualingACApp(App):
     def _start_handshake(self):
         if not self.gatt_ready or not self.write_char:
             return
+        t1 = self.protocol.build_conn_frame(0x01, bytes([1,0,0,0,0,0,0,0,0,0]))
+        self.queue_frame(t1, 't1')    
+            
         self._cancel_handshake_timers()
         self.hs_state = 'c1_wait'
         self.c1_count = 0
