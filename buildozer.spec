@@ -5,15 +5,15 @@ package.domain = qgb
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-# 图标配置（保持你的路径，修正为标准的6位纯红实色）
-icon.filename = android_src/splash.png
+# 图标配置（引入绝对路径宏，防止打包切换目录时找不到文件）
+icon.filename = %(source.dir)s/android_src/splash.png
 icon.adaptive_icon_background = #FF0000
-icon.adaptive_icon_foreground = android_src/splash.png
+icon.adaptive_icon_foreground = %(source.dir)s/android_src/splash.png
 
-# 官方正确的自定义开屏图片参数
-presplash.filename = android_src/splash.png
+# 官方正确的自定义开屏图片参数（必须加路径宏）
+presplash.filename = %(source.dir)s/android_src/splash.png
 
-# 官方正确的开屏背景色（必须是6位不透明色，与图片底色融为一体）
+# 官方正确的开屏背景色
 android.presplash_color = #FF0000
 
 version = 0.1
