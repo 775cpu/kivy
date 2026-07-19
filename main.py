@@ -470,12 +470,19 @@ class MideaProtocol:
         self.session_key=hashlib.sha256(shared).digest()[:16]
         return self.session_key
     def build_conn_frame(self, conn_type, payload):
-        seq=self.conn_seq; self.conn_seq=(self.conn_seq+1)&0xFF
-        body_len=len(payload)+4
-        frame=bytearray(2+1+1+1+len(payload)+1)
-        frame[0]=0xAA; frame[1]=0x55; frame[2]=body_len&0xFF; frame[3]=seq; frame[4]=conn_type
-        frame[5:5+len(payload)]=payload; frame[-1]=checksum_neg(frame[2:-1])
+        seq = self.conn_seq
+        self.conn_seq = (self.conn_seq + 1) & 0xFF
+        body_len = len(payload) + 4   #协议规定 LEN = len(payload) + 4
+        frame = bytearray(2 + 1 + 1 + 1 + len(payload) + 1)
+        frame[0] = 0xAA
+        frame[1] = 0x55
+        frame[2] = body_len & 0xFF
+        frame[3] = seq
+        frame[4] = conn_type
+        frame[5:5+len(payload)] = payload
+        frame[-1] = checksum_neg(frame[2:-1])
         return bytes(frame)
+        
     def build_security_frame(self, cmd, body):
         self.sec_seq=(self.sec_seq+1)&0xFF; length=len(body)
         return bytes([cmd, self.sec_seq, length])+body
@@ -554,8 +561,7 @@ class HualingACApp(App):
     gatt_ready = BooleanProperty(False)
     control_ready = BooleanProperty(False)
     target_temp = NumericProperty(25)
-    # 修正后的 advertisData（末尾为正序物理 MAC）
-    advertis_data_input = StringProperty('AC32323034303535372427308D360D')
+    advertis_data_input = StringProperty('AC32323034303535372427308D360D')  # 正序MAC
 
     MIDEA_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
     MIDEA_WRITE_UUID = "0000ffa1-0000-1000-8000-00805f9b34fb"
@@ -592,18 +598,20 @@ class HualingACApp(App):
         self.scan_timeout_event = None
         self.handshake_timeout_event = None
         self.c1_timer = None
-        self.c2c3_timer = None
+        self.step_timer = None          # 替换 c2c3_timer
+        self.c2_frame = None
+        self.c3_frame = None
+        self.step_count = 0
         self.c1_count = 0
-        self.c2c3_count = 0
         self.hs_state = 'idle'
         self.desired_state = {'power': False, 'mode': 'cool', 'temp': 25, 'fan': 'auto'}
         self.rx_buffer = b''
         self._log('[App] Starting...')
         Clock.schedule_once(lambda dt: self.startup(), 0.2)
-        # 移除了 MTU 超时计时器，只保留服务发现超时（仍然需要兜底）
         self._service_discovery_timeout = None
         return self.root_widget
 
+    # ---------- 日志和界面更新 ----------
     def _log(self, msg):
         print(f'[BLE-DEBUG] {msg}')
         lines = self.log_text.split('\n') if self.log_text else []
@@ -645,7 +653,7 @@ class HualingACApp(App):
 
     def cancel_timers(self):
         for ev in ('auto_reconnect_event', 'scan_timeout_event', 'handshake_timeout_event',
-                   'c1_timer', 'c2c3_timer'):
+                   'c1_timer', 'step_timer'):
             e = getattr(self, ev, None)
             if e:
                 try:
@@ -802,6 +810,9 @@ class HualingACApp(App):
     def connect_to_device(self, address, name='', advertis_data_hex=''):
         self._log(f'[UI] connect_to_device {address} ({name}) advertisData: {advertis_data_hex}')
         if self.is_connecting or self.is_connected:
+            # 存在进行中的连接，先断开再延迟重试
+            self.disconnect_gatt(False)
+            Clock.schedule_once(lambda dt: self.connect_to_device(address, name, advertis_data_hex), 0.6)
             return
         if not address:
             return
@@ -847,7 +858,9 @@ class HualingACApp(App):
         self.connection_generation += 1
         self.hs_state = 'idle'
         self._cancel_handshake_timers()
-        # 清理服务发现超时
+        self.c2_frame = None
+        self.c3_frame = None
+        self.step_count = 0
         if self._service_discovery_timeout:
             self._service_discovery_timeout.cancel()
             self._service_discovery_timeout = None
@@ -877,7 +890,7 @@ class HualingACApp(App):
                 pass
         self.auto_reconnect_event = Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), delay)
 
-    # ---------- GATT event handlers ----------
+    # ---------- GATT 事件处理 ----------
     def _on_gatt_connection_state_change(self, gen, status, newState):
         if gen != self.connection_generation:
             return
@@ -886,7 +899,6 @@ class HualingACApp(App):
             self.is_connected = True
             self._log('[GATT] Connected')
             self.handshake_text = 'Handshake: Service Discovery'
-            # 不再请求 MTU，直接发现服务
             if self.gatt:
                 self._log('[GATT] Starting service discovery...')
                 self.gatt.discoverServices()
@@ -931,9 +943,13 @@ class HualingACApp(App):
                 self.gatt.setCharacteristicNotification(notify_char, True)
                 cccd = notify_char.getDescriptor(UUID.fromString(self.CCCD_UUID))
                 if cccd:
-                    cccd.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    cccd.setValue(b'\x01\x00')  # Notification
                     ok = self.gatt.writeDescriptor(cccd)
-                    self._log(f'[GATT] writeDescriptor for notify returned: {ok}')
+                    self._log(f'[GATT] writeDescriptor (0x0003) returned: {ok}')
+                    if not ok:
+                        cccd.setValue(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
+                        ok = self.gatt.writeDescriptor(cccd)
+                        self._log(f'[GATT] writeDescriptor (Indication) returned: {ok}')
                     if not ok:
                         Clock.schedule_once(lambda dt, d=cccd: self._retry_write_descriptor(d), 0.3)
                 self.notification_ready = True
@@ -949,10 +965,8 @@ class HualingACApp(App):
 
             self.protocol.derive_root_key(self.current_advertis_data)
             self.protocol.create_ec_keypair()
-            self.hs_state = 'c1'
-            self.c1_count = 0
-            # 延迟 6 秒再发送 C1，确保通知描述符写入完成
-            Clock.schedule_once(lambda dt: self._send_c1(), 6.0)
+            # 等待通知通道稳定，再开始握手
+            Clock.schedule_once(lambda dt: self._start_handshake(), 0.8)
 
         except Exception as e:
             self._log(f'[GATT] Service setup error {e}')
@@ -966,18 +980,87 @@ class HualingACApp(App):
         except Exception as e:
             self._log(f'[GATT] retry writeDescriptor error: {e}')
 
-    def _send_c1(self):
-        if not self.gatt_ready or not self.write_char or self.hs_state != 'c1':
+    # ---------- 握手状态机 (修复版) ----------
+    def _start_handshake(self):
+        if not self.gatt_ready or not self.write_char:
             return
-        frame = self.protocol.build_c1_frame()
+        self._cancel_handshake_timers()
+        self.hs_state = 'c1_wait'
+        self.c1_count = 0
+        self._send_c1()
+        self._schedule_c1_retry()
+
+    def _send_c1(self):
+        if not self.gatt_ready or not self.write_char or self.hs_state != 'c1_wait':
+            return
+        frame = self.protocol.build_c1_frame()          # 每次重发都是全新帧
         self.queue_frame(frame, 'c1')
         self.c1_count += 1
-        if self.c1_count < 15:
-            self.c1_timer = Clock.schedule_once(lambda dt: self._send_c1(), 1.5)
-        else:
+        self._log(f'[SEC] Sent C1 #{self.c1_count}')
+
+    def _schedule_c1_retry(self):
+        if self.c1_timer:
+            self.c1_timer.cancel()
+        self.c1_timer = Clock.schedule_once(lambda dt: self._c1_retry(), 1.5)
+
+    def _c1_retry(self):
+        if self.hs_state != 'c1_wait':
+            return
+        if self.c1_count >= 15:
             self._log('[SEC] C1 timeout')
             self.disconnect_gatt(False)
             self.schedule_reconnect()
+            return
+        # 清空可能残留的写请求，重发全新 C1
+        self.write_queue.clear()
+        self._send_c1()
+        self._schedule_c1_retry()
+
+    def _send_c2(self):
+        if not self.gatt_ready or not self.write_char or self.hs_state != 'c2_wait':
+            return
+        self.c2_frame = self.protocol.build_c2_frame()   # 保存帧，后续重发用同一帧
+        self.queue_frame(self.c2_frame, 'c2')
+        self.step_count = 0
+        self._log('[SEC] Sent C2')
+
+    def _send_c3(self):
+        if not self.gatt_ready or not self.write_char or self.hs_state != 'c3_wait':
+            return
+        self.c3_frame = self.protocol.build_c3_frame(self.protocol.ec_pub_64, self.current_advertis_data)
+        self.queue_frame(self.c3_frame, 'c3')
+        self.step_count = 0
+        self._log('[SEC] Sent C3')
+
+    def _schedule_step_retry(self):
+        if self.step_timer:
+            self.step_timer.cancel()
+        self.step_timer = Clock.schedule_once(lambda dt: self._step_retry(), 1.2)
+
+    def _step_retry(self):
+        if self.hs_state not in ('c2_wait', 'c3_wait'):
+            return
+        self.step_count += 1
+        if self.step_count > 8:
+            self._log('[SEC] Step timeout')
+            self.disconnect_gatt(False)
+            self.schedule_reconnect()
+            return
+        self.write_queue.clear()
+        if self.hs_state == 'c2_wait' and self.c2_frame:
+            self.queue_frame(self.c2_frame, 'c2_retry')
+            self._log('[SEC] Resend C2')
+        elif self.hs_state == 'c3_wait' and self.c3_frame:
+            self.queue_frame(self.c3_frame, 'c3_retry')
+            self._log('[SEC] Resend C3')
+        self._schedule_step_retry()
+
+    def _cancel_handshake_timers(self):
+        for t in ('c1_timer', 'step_timer'):
+            timer = getattr(self, t, None)
+            if timer:
+                timer.cancel()
+                setattr(self, t, None)
 
     def _on_gatt_characteristic_write(self, gen, status):
         if gen != self.connection_generation:
@@ -999,57 +1082,7 @@ class HualingACApp(App):
         self.rx_buffer += data
         self._process_rx()
 
-    # ---------- Handshake state machine ----------
-    def _cancel_handshake_timers(self):
-        if self.c1_timer:
-            try:
-                self.c1_timer.cancel()
-            except:
-                pass
-            self.c1_timer = None
-        if self.c2c3_timer:
-            try:
-                self.c2c3_timer.cancel()
-            except:
-                pass
-            self.c2c3_timer = None
-        if self.handshake_timeout_event:
-            try:
-                self.handshake_timeout_event.cancel()
-            except:
-                pass
-            self.handshake_timeout_event = None
-
-    def _send_c2(self):
-        if not self.gatt_ready or not self.write_char:
-            return
-        frame = self.protocol.build_c2_frame()
-        self.queue_frame(frame, 'c2')
-        self.hs_state = 'c2'
-        self.c2c3_count = 0
-        self._c2c3_resend(frame)
-
-    def _c2c3_resend(self, frame):
-        if self.hs_state not in ('c2', 'c3'):
-            return
-        self.c2c3_count += 1
-        if self.c2c3_count < 8:
-            self.c2c3_timer = Clock.schedule_once(lambda dt: self._c2c3_resend(frame), 1.2)
-        else:
-            self._log('[SEC] C2/C3 timeout')
-            self.disconnect_gatt(False)
-            self.schedule_reconnect()
-
-    def _send_c3(self):
-        if not self.gatt_ready or not self.write_char:
-            return
-        frame = self.protocol.build_c3_frame(self.protocol.ec_pub_64, self.current_advertis_data)
-        self.queue_frame(frame, 'c3')
-        self.hs_state = 'c3'
-        self.c2c3_count = 0
-        self._c2c3_resend(frame)
-
-    # ---------- RX processing ----------
+    # ---------- RX 处理 ----------
     def _process_rx(self):
         while True:
             res = self.protocol.parse_conn_frame(self.rx_buffer)
@@ -1064,32 +1097,37 @@ class HualingACApp(App):
                     body = sec[3:] if len(sec) > 3 else b''
                     if cmd == self.protocol.SEC_C1:
                         self._log('[SEC] Received C1 response')
-                        if self.hs_state == 'c1':
+                        if self.hs_state == 'c1_wait':
                             self._cancel_handshake_timers()
+                            self.hs_state = 'c2_wait'
                             self._send_c2()
+                            self._schedule_step_retry()
                     elif cmd == self.protocol.SEC_C2:
                         self._log(f'[SEC] Received C2, peer_pub={hexstr(body)}')
                         if len(body) != 64:
                             self._log('[SEC] Invalid C2 length')
                             return
-                        if self.hs_state == 'c2':
+                        if self.hs_state == 'c2_wait':
                             self._cancel_handshake_timers()
                             self.protocol.derive_session_key(body)
+                            self.hs_state = 'c3_wait'
                             self._send_c3()
+                            self._schedule_step_retry()
                     elif cmd == self.protocol.SEC_C3:
                         self._log('[SEC] Received C3 result')
-                        if len(body) >= 1 and body[0] == 1:
-                            self.hs_state = 'biz'
+                        if self.hs_state == 'c3_wait':
                             self._cancel_handshake_timers()
-                            self.handshake_done = True
-                            self.control_ready = True
-                            self.handshake_text = 'Handshake: Completed'
-                            self._set_status('[SEC] Handshake complete')
-                            self.send_query_frame()
-                        else:
-                            self._log('[SEC] Handshake failed')
-                            self.disconnect_gatt(False)
-                            self.schedule_reconnect()
+                            if len(body) >= 1 and body[0] == 1:
+                                self.hs_state = 'biz'
+                                self.handshake_done = True
+                                self.control_ready = True
+                                self.handshake_text = 'Handshake: Completed'
+                                self._set_status('[SEC] Handshake complete')
+                                self.send_query_frame()
+                            else:
+                                self._log('[SEC] Handshake failed')
+                                self.disconnect_gatt(False)
+                                self.schedule_reconnect()
                 except Exception as e:
                     self._log(f'[SEC] Decrypt error {e}')
             elif conn_type == self.protocol.CONN_T3:
@@ -1110,7 +1148,7 @@ class HualingACApp(App):
                 except Exception as e:
                     self._log(f'[BIZ] Decrypt error {e}')
 
-    # ---------- Write queue ----------
+    # ---------- 写队列 ----------
     def queue_frame(self, frame, tag=''):
         if not self.gatt or not self.is_connected or not self.write_char:
             return
@@ -1137,7 +1175,7 @@ class HualingACApp(App):
             self.write_in_progress = False
             self._log(f'[WRITE] error {e}')
 
-    # ---------- Business commands ----------
+    # ---------- 业务命令 ----------
     def send_query_frame(self):
         if not self.control_ready:
             return
@@ -1170,7 +1208,7 @@ class HualingACApp(App):
         except Exception as e:
             self._set_status(f'[RPC] Error: {e}')
 
-    # ---------- UI actions ----------
+    # ---------- UI 操作 ----------
     def toggle_power(self):
         self._log('[UI] Power toggle pressed')
         self.desired_state['power'] = not self.desired_state['power']
