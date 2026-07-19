@@ -20,6 +20,17 @@ android {
     }
 }
 
+configurations.configureEach {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == "org.jetbrains.kotlin" &&
+                (details.requested.name == "kotlin-stdlib" ||
+                 details.requested.name == "kotlin-stdlib-jdk7" ||
+                 details.requested.name == "kotlin-stdlib-jdk8")) {
+            details.useVersion "1.8.22"
+        }
+    }
+}
+
 dependencies {
     implementation "androidx.appcompat:appcompat:1.7.0"
     implementation "com.google.android.material:material:1.9.0"

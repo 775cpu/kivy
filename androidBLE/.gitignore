@@ -1,0 +1,14 @@
+# Gradle / Android build artifacts
+#.gradle/
+build/
+app/build/intermediates/
+app/build/generated/
+app/build/tmp/
+app/build/reports/
+app/build/outputs/mapping/
+app/build/outputs/logs/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.log
