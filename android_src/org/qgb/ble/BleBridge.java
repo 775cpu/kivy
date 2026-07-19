@@ -5,10 +5,11 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
-import android.bluetooth.BluetoothGattDescriptor;   // 新增导入
+import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import java.util.List;
@@ -102,7 +103,27 @@ public final class BleBridge {
                     if (name == null || name.isEmpty()) {
                         name = "Unknown Device";
                     }
+
+                    // 获取完整广播数据并转换成十六进制字符串
+                    ScanRecord record = result.getScanRecord();
+                    String recordHex = "";
+                    if (record != null) {
+                        byte[] bytes = record.getBytes();
+                        StringBuilder sb = new StringBuilder();
+                        for (byte b : bytes) {
+                            sb.append(String.format("%02X", b));
+                        }
+                        recordHex = sb.toString();
+                    }
+
                     try {
+                        // 优先调用新方法，传递完整广播数据
+                        listener.onDeviceFoundWithRecord(address, name, result.getRssi(), recordHex);
+                    } catch (Throwable ignored) {
+                    }
+
+                    try {
+                        // 保留旧回调，兼容不支持新方法的实现
                         listener.onDeviceFound(address, name, result.getRssi());
                     } catch (Throwable ignored) {
                     }
@@ -181,7 +202,6 @@ public final class BleBridge {
             }
         }
 
-        // ---------- 新增 ----------
         @Override
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
             if (listener != null) {
