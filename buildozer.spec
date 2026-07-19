@@ -4,18 +4,17 @@ package.name = hualing
 package.domain = qgb
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
+
+# 图标配置（保持你的路径，修正为标准的6位纯红实色）
 icon.filename = android_src/splash.png
-icon.adaptive_icon_background = #ff000014
+icon.adaptive_icon_background = #FF0000
 icon.adaptive_icon_foreground = android_src/splash.png
 
-# 自定义开屏图片
-android.splash_image = android_src/splash.png
-# 启动图背景色（不填默认黑色，和图片底色匹配更美观）
-android.splash_color = #ff000014
-# 是否隐藏默认Kivy文字水印（必须加，否则底部显示Powered by Kivy）
-android.splash_remove_label = True
-# 全屏启动图，和你fullscreen=1匹配
-android.splash_fullscreen = True
+# 官方正确的自定义开屏图片参数
+presplash.filename = android_src/splash.png
+
+# 官方正确的开屏背景色（必须是6位不透明色，与图片底色融为一体）
+android.presplash_color = #FF0000
 
 version = 0.1
 requirements = hostpython3==3.11.9, python3==3.11.9, kivy, android, able_recipe,pyjnius,pyaes,dill
@@ -24,7 +23,6 @@ android.permissions = INTERNET, BLUETOOTH, BLUETOOTH_ADMIN, BLUETOOTH_SCAN, BLUE
 orientation = portrait
 fullscreen = 1
 android.archs = arm64-v8a
-#, armeabi-v7a
 android.add_src = android_src
 android.allow_backup = True
 android.accept_sdk_license = True
