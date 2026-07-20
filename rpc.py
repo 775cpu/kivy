@@ -121,9 +121,19 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                 self.send_response(500)
             finally:
                 sys.stdout = old_stdout
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+
+            # 如果没有设置 Content-Type，则添加默认的
+            if 'Content-Type' not in resp.headers:
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
             self.end_headers()
-            self.wfile.write(result_str.encode('utf-8'))
+            # 如果用户通过 set_data 设置了响应体，优先使用它
+            if resp.data is not None:
+                body = resp.data
+                if isinstance(body, str):
+                    body = body.encode('utf-8')
+                self.wfile.write(body)
+            else:
+                self.wfile.write(result_str.encode('utf-8'))
         except Exception as e:
             self.send_error(500, str(e))
 
