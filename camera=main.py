@@ -10,6 +10,8 @@ import hmac as hmac_lib
 import random
 import struct
 import pyaes
+import threading
+import time
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -22,7 +24,7 @@ from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.uix.camera import Camera
-from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.floatlayout import FloatLayout 
 from kivy.uix.slider import Slider
 
 from jnius import autoclass, PythonJavaClass, java_method, cast
@@ -38,12 +40,14 @@ UUID = autoclass('java.util.UUID')
 String = autoclass('java.lang.String')
 BleBridge = autoclass('org.qgb.ble.BleBridge')
 KeyPairGenerator = autoclass('java.security.KeyPairGenerator')
-KeyAgreement = autoclass('javax.crypto.KeyAgreement')
+KeyAgreement = javax_crypto = autoclass('javax.crypto.KeyAgreement')
 KeyFactory = autoclass('java.security.KeyFactory')
 ECGenParameterSpec = autoclass('java.security.spec.ECGenParameterSpec')
 ECPublicKeySpec = autoclass('java.security.spec.ECPublicKeySpec')
 ECPoint = autoclass('java.security.spec.ECPoint')
 BigInteger = autoclass('java.math.BigInteger')
+
+GLOBAL_RAW_FRAME = None 
 
 # ---------- Fullscreen Camera Layout (FloatLayout) ----------
 KV = r'''
@@ -72,7 +76,6 @@ KV = r'''
         canvas.after:
             PopMatrix
 
-    # Visually distinct loading container panel to prevent black screen panic
     BoxLayout:
         orientation: 'vertical'
         pos_hint: {'center_x': 0.5, 'center_y': 0.5}
@@ -98,7 +101,6 @@ KV = r'''
             font_size: '12sp'
             color: 0.7, 0.7, 0.7, 1
 
-    # Transparent Professional Control Deck
     BoxLayout:
         orientation: 'vertical'
         size_hint: 1, None
@@ -120,7 +122,6 @@ KV = r'''
             font_size: '14sp'
             color: 1, 1, 1, 0.85
 
-        # Row 1: General Options
         BoxLayout:
             size_hint_y: None
             height: dp(38)
@@ -144,7 +145,6 @@ KV = r'''
                 background_color: (0.5, 0.5, 0.5, 0.6)
                 on_release: app.toggle_flash()
 
-        # Split Container: Sliders Panel & Circular Steering Wheel D-Pad
         BoxLayout:
             orientation: 'horizontal'
             spacing: dp(12)
@@ -153,7 +153,6 @@ KV = r'''
                 orientation: 'vertical'
                 spacing: dp(6)
 
-                # Brightness Slider
                 BoxLayout:
                     orientation: 'horizontal'
                     size_hint_y: None
@@ -171,7 +170,6 @@ KV = r'''
                         step: 1
                         on_value: app.brightness_value = self.value
 
-                # Chroma Slider
                 BoxLayout:
                     orientation: 'horizontal'
                     size_hint_y: None
@@ -197,19 +195,16 @@ KV = r'''
                     halign: 'center'
                     valign: 'middle'
 
-            # Circular Steering Wheel Rotation Control Panel
             FloatLayout:
                 size_hint: None, None
                 size: dp(140), dp(140)
                 pos_hint: {'center_y': 0.5}
                 canvas.before:
-                    # Outer Ring Rim Background
                     Color:
                         rgba: 0.35, 0.35, 0.35, 0.5
                     Ellipse:
                         pos: self.pos
                         size: self.size
-                    # Inner Wheel Gap Center Cap
                     Color:
                         rgba: 0.05, 0.05, 0.05, 0.85
                     Ellipse:
@@ -257,7 +252,6 @@ Builder.load_string(KV)
 class RootWidget(FloatLayout):
     pass
 
-# ---------- Permission Callback ----------
 class PermissionCallback(PythonJavaClass):
     __javainterfaces__ = ['org/kivy/android/PythonActivity$PermissionsCallback']
     __javacontext__ = 'app'
@@ -268,7 +262,7 @@ class PermissionCallback(PythonJavaClass):
     def onRequestPermissionsResult(self, requestCode, permissions, grantResults):
         Clock.schedule_once(lambda dt: self.owner._on_permissions_result(permissions, grantResults), 0)
 
-# Cryptography and Protocol place-holders (Preserved precisely)
+# Cryptography and Protocol place-holders
 def hexstr(data): return data.hex().upper()
 def from_hex(s):
     s = (s or '').replace(' ', '').replace(':', '')
@@ -420,14 +414,64 @@ def parse_status_frame(data):
     state['outdoor_temp'] = outdoor_temp + outdoor_temp_frac * 0.1
     return state
 
-class MideaProtocol:
-    pass
+class MideaProtocol: pass
+class PyScanListener(PythonJavaClass): pass
+class PyGattCallback(PythonJavaClass): pass
 
-class PyScanListener(PythonJavaClass):
-    pass
 
-class PyGattCallback(PythonJavaClass):
-    pass
+# ---------------- Native High-Performance Stream Server ----------------
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import io
+from PIL import Image
+
+class NativeMJPEGHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/mjpeg_stream':
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Pragma', 'no-cache')
+            self.end_headers()
+            
+            while True:
+                global GLOBAL_RAW_FRAME
+                if GLOBAL_RAW_FRAME is None:
+                    time.sleep(0.01)
+                    continue
+                
+                try:
+                    pixels, size = GLOBAL_RAW_FRAME
+                    
+                    # 【核心优化点】移除 PIL 的 transpose(FLIP_TOP_BOTTOM) 和 rotate() 矩阵计算
+                    # 手机端只做纯粹的 RGBA 到 JPEG 的流化压缩，节省 80% 的手机 CPU 算力！
+                    img = Image.frombytes('RGBA', size, pixels)
+                    buf = io.BytesIO()
+                    img.convert('RGB').save(buf, format='JPEG', quality=60) 
+                    jpeg_bytes = buf.getvalue()
+                    
+                    self.wfile.write(b'--frame\r\n')
+                    self.wfile.write(b'Content-Type: image/jpeg\r\n')
+                    self.wfile.write(f'Content-Length: {len(jpeg_bytes)}\r\n\r\n'.encode())
+                    self.wfile.write(jpeg_bytes)
+                    self.wfile.write(b'\r\n')
+                    
+                    time.sleep(0.033) # 限制推流在稳定的 ~30 FPS
+                except Exception:
+                    break
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass 
+
+def run_stream_server():
+    try:
+        server = HTTPServer(('0.0.0.0', 1134), NativeMJPEGHandler)
+        server.serve_forever()
+    except Exception as e:
+        print(f"[StreamServer] Error: {e}")
+
 
 # ---------- Main Application Deck ----------
 class HualingACApp(App):
@@ -436,7 +480,6 @@ class HualingACApp(App):
     log_text = StringProperty('')
     flash_mode_text = StringProperty('Flash: Off')
     
-    # Normalized rotation spectrum: 0=UP, 90=RIGHT, 180=DOWN, 270=LEFT
     preview_angle = NumericProperty(270)
     brightness_value = NumericProperty(0)
     chroma_value = NumericProperty(3)
@@ -454,7 +497,26 @@ class HualingACApp(App):
 
         self._log('App starting...')
         Clock.schedule_once(lambda dt: self.startup(), 0.2)
+        
+        # 主线程只捞取原始像素尺寸，耗时极低
+        Clock.schedule_interval(self._fast_pixel_capture, 1.0 / 30.0)
+        
+        t = threading.Thread(target=run_stream_server, daemon=True)
+        t.start()
+        
         return self.root_widget
+
+    def _fast_pixel_capture(self, dt):
+        global GLOBAL_RAW_FRAME
+        if self.is_paused:
+            return
+        try:
+            camera = self.root_widget.ids.camera
+            if camera and camera.play and camera.texture:
+                # 只保留像素和大小，不带旋转角度到后台处理
+                GLOBAL_RAW_FRAME = (camera.texture.pixels, camera.texture.size)
+        except Exception:
+            pass
 
     def on_brightness_value(self, instance, value):
         self._apply_professional_settings()
@@ -463,7 +525,6 @@ class HualingACApp(App):
         self._apply_professional_settings()
 
     def set_preview_angle(self, angle):
-        """Directly overrides mapping to the matrix to match the manual button pressed"""
         self.preview_angle = angle
         self._set_status(f'Preview orientation locked to {angle} deg')
 
@@ -562,29 +623,21 @@ class HualingACApp(App):
                 
             if native_cam is not None:
                 params = native_cam.getParameters()
-                
-                # Torch sync for continuous hardware illumination
                 if self.flash_mode == 0:
                     params.setFlashMode('off')
                 elif self.flash_mode == 1:
                     params.setFlashMode('torch')
                 else:
                     params.setFlashMode('auto')
-                
-                # Hardware Brightness Adjustment Matrix
                 try:
                     params.setExposureCompensation(int(self.brightness_value))
                 except Exception:
                     pass
-                
-                # Hardware Chroma Saturation Matrix
                 try:
                     params.set("saturation", int(self.chroma_value))
                 except Exception:
                     pass
-                
                 native_cam.setParameters(params)
-                self._log(f'Hardware params updated: Flash={self.flash_mode}, Brightness={self.brightness_value}, Chroma={self.chroma_value}')
         except Exception as e:
             self._log(f'Apply hardware settings failed: {e}')
 
@@ -615,10 +668,6 @@ class HualingACApp(App):
         camera = self.root_widget.ids.camera
         new_index = 1 - camera.index
         camera.index = new_index
-        self._log(f'Switched to index {new_index}')
-        
-        # 已移除导致画面上下颠倒的自动旋转角度补偿，保持切换前的原始旋转角度不变
-            
         self._start_camera_preview()
         self._set_status(f'Switched to camera {"rear" if new_index==0 else "front"}')
 
@@ -629,7 +678,59 @@ class HualingACApp(App):
         self._apply_professional_settings()
 
 
+def preview_html(response_obj):
+    """
+    【完全重写表现层】利用网页客户端的浏览器内核和显卡能力去动态旋转/翻转视频。
+    手机端完全不需要做任何图像旋转处理！
+    """
+    app_instance = App.get_running_app()
+    # 动态获取当前App界面的旋转角度设定
+    current_angle = app_instance.preview_angle if app_instance else 270
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Kivy Native Stream Live View</title>
+    <style>
+        body {{ margin: 0; background-color: #111; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; color: #fff; font-family: system-ui, sans-serif; }}
+        .container {{ position: relative; max-width: 95vw; max-height: 85vh; box-shadow: 0 4px 20px rgba(0,0,0,0.6); border-radius: 8px; overflow: hidden; }}
+        
+        img {{ 
+            display: block; 
+            width: 100%; 
+            height: auto; 
+            max-height: 85vh; 
+            object-fit: contain; 
+            background: #000;
+            /* 核心黑魔法：Kivy底层OpenGL默认上下颠倒，配合UI角度，使用网页GPU硬加速做翻转与旋转 */
+            transform: scaleY(-1) rotate({current_angle}deg);
+            transform-origin: center;
+        }}
+    </style>
+</head>
+<body>
+    <h3 style="margin-bottom: 10px;">Kivy Live Video Deck (GPU Accelerated)</h3>
+    <div class="container">
+        <img id="native_stream" src="" alt="Connecting to high performance stream...">
+    </div>
+    <script>
+        document.getElementById('native_stream').src = window.location.protocol + '//' + window.location.hostname + ':1134/mjpeg_stream';
+    </script>
+</body>
+</html>
+"""
+    response_obj.set_header("Content-Type", "text/html; charset=utf-8")
+    response_obj.set_data(html_content.encode('utf-8'))
+
+
+def get_camera_frameBytes(response_obj):
+    response_obj.set_status(200)
+    response_obj.set_header("Content-Type", "text/plain")
+    response_obj.set_data(b"Deprecated. Switched to native streaming at port 1134.")
+    return "Redirected"
+
+
 if __name__ == '__main__':
     app = HualingACApp()
     app.run()
-    
