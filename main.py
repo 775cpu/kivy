@@ -694,13 +694,54 @@ class HualingACApp(App):
         self.request_permissions()
 
     def _required_permissions(self):
-        if int(Build_VERSION.SDK_INT) >= 31:
-            return ["android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT"]
+        from android.os import Build
+        sdk = int(Build.VERSION.SDK_INT)
+        base_perms = [
+            "android.permission.INTERNET",
+            "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
+            "android.permission.WAKE_LOCK",
+            "android.permission.POST_NOTIFICATIONS",
+            "android.permission.ACCESS_WIFI_STATE",
+            "android.permission.CHANGE_WIFI_STATE",
+            "android.permission.REQUEST_INSTALL_PACKAGES",
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.READ_PHONE_STATE",
+            "android.permission.RECEIVE_BOOT_COMPLETED"
+        ]
+
+        # 存储权限分版本适配
+        if sdk >= 33:
+            media_perms = [
+                "android.permission.READ_MEDIA_IMAGES",
+                "android.permission.READ_MEDIA_VIDEO",
+                "android.permission.READ_MEDIA_AUDIO"
+            ]
         else:
-            return ["android.permission.ACCESS_FINE_LOCATION",
-                    "android.permission.ACCESS_COARSE_LOCATION",
-                    "android.permission.BLUETOOTH",
-                    "android.permission.BLUETOOTH_ADMIN"]
+            media_perms = [
+                "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.WRITE_EXTERNAL_STORAGE"
+            ]
+
+        # 蓝牙 + 定位分版本
+        if sdk >= 31:  # Android 12+ SDK31
+            bt_location_perms = [
+                "android.permission.BLUETOOTH_SCAN",
+                "android.permission.BLUETOOTH_CONNECT",
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.ACCESS_BACKGROUND_LOCATION"
+            ]
+        else:  # Android11及以下
+            bt_location_perms = [
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.ACCESS_COARSE_LOCATION",
+                "android.permission.BLUETOOTH",
+                "android.permission.BLUETOOTH_ADMIN"
+            ]
+
+        # 合并全部权限返回
+        all_perms = base_perms + media_perms + bt_location_perms
+        return all_perms
 
     def request_permissions(self):
         perms = self._required_permissions()
