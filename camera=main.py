@@ -47,7 +47,49 @@ ECPublicKeySpec = autoclass('java.security.spec.ECPublicKeySpec')
 ECPoint = autoclass('java.security.spec.ECPoint')
 BigInteger = autoclass('java.math.BigInteger')
 
-GLOBAL_RAW_FRAME = None 
+# 新增 Android 原生高性能图像处理类
+YuvImage = autoclass('android.graphics.YuvImage')
+Rect = autoclass('android.graphics.Rect')
+ImageFormat = autoclass('android.graphics.ImageFormat')
+ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+
+# 全局高能数据流载体：直接存储原生 JPEG 字节块
+GLOBAL_JPEG_BYTES = None 
+GLOBAL_CAM_WIDTH = 640
+GLOBAL_CAM_HEIGHT = 480
+
+# ---------- Pyjnius 原生零轮询异步回调接口 ----------
+class AndroidPreviewCallback(PythonJavaClass):
+    __javainterfaces__ = ['android/hardware/Camera$PreviewCallback']
+    __javacontext__ = 'app'
+
+    def __init__(self):
+        super().__init__()
+
+    @java_method('([BLandroid/hardware/Camera;)V')
+    def onPreviewFrame(self, data, camera):
+        """
+        Android 原生硬回调，完全脱离 Kivy Clock 定时器。
+        只要底层硬件采集完毕，直接注入该方法。
+        """
+        global GLOBAL_JPEG_BYTES, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        try:
+            # 1. 瞬间锁定当前配置的分辨率大小
+            w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+            
+            # 2. 利用 Android 原生极速的 YUV 编码核心（NV21 转 JPEG）
+            # 不经过 Python 慢速循环，直接在原生内存层完成高效压缩
+            yuv = YuvImage(data, ImageFormat.NV21, w, h, None)
+            bos = ByteArrayOutputStream()
+            yuv.compressToJpeg(Rect(0, 0, w, h), 70, bos) # 图像质量设为70平衡带宽与画质
+            
+            # 3. 将生产出的原生 JPEG 字节直接送入全局推流缓存
+            GLOBAL_JPEG_BYTES = bos.toByteArray()
+        except Exception as e:
+            print(f"[NativeCallbackError] {e}")
+
+# 初始化原生监听回调实例
+NATIVE_CALLBACK = AndroidPreviewCallback()
 
 # ---------- Fullscreen Camera Layout (FloatLayout) ----------
 KV = r'''
@@ -262,159 +304,7 @@ class PermissionCallback(PythonJavaClass):
     def onRequestPermissionsResult(self, requestCode, permissions, grantResults):
         Clock.schedule_once(lambda dt: self.owner._on_permissions_result(permissions, grantResults), 0)
 
-# Cryptography and Protocol place-holders
-def hexstr(data): return data.hex().upper()
-def from_hex(s):
-    s = (s or '').replace(' ', '').replace(':', '')
-    if len(s) % 2: raise ValueError('even hex length required')
-    return bytes.fromhex(s)
-def checksum_neg(data): return (1 + (~(sum(data) & 0xFF))) & 0xFF
-def hkdf_sha256(ikm, salt, info, length):
-    if salt is None: salt = b'\x00' * 32
-    prk = hmac_lib.new(salt, ikm, hashlib.sha256).digest()
-    t = b""; okm = b""
-    for i in range(1, (length+31)//32+1):
-        t = hmac_lib.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
-        okm += t
-    return okm[:length]
 
-def generate_ec_keypair():
-    kg = KeyPairGenerator.getInstance("EC")
-    kg.initialize(ECGenParameterSpec("secp256r1"))
-    kp = kg.generateKeyPair()
-    priv = kp.getPrivate()
-    pub = kp.getPublic()
-    ec_pub = cast('java.security.interfaces.ECPublicKey', pub)
-    x_java = ec_pub.getW().getAffineX().toByteArray()
-    y_java = ec_pub.getW().getAffineY().toByteArray()
-    x_bytes = bytes([b & 0xFF for b in x_java])
-    y_bytes = bytes([b & 0xFF for b in y_java])
-    def pad32(b):
-        if len(b) > 32: b = b[-32:]
-        elif len(b) < 32: b = b'\x00'*(32-len(b))+b
-        return b
-    pub_bytes = b'\x04' + pad32(x_bytes) + pad32(y_bytes)
-    return priv, pub_bytes
-
-def ecdh_shared_secret(priv_key, peer_pub_64):
-    x_bytes = peer_pub_64[:32]; y_bytes = peer_pub_64[32:]
-    x = BigInteger(1, x_bytes); y = BigInteger(1, y_bytes)
-    tmp_kg = KeyPairGenerator.getInstance("EC")
-    tmp_kg.initialize(ECGenParameterSpec("secp256r1"))
-    tmp_kp = tmp_kg.generateKeyPair()
-    params = tmp_kp.getPublic().getParams()
-    pub_spec = ECPublicKeySpec(ECPoint(x, y), params)
-    kf = KeyFactory.getInstance("EC")
-    peer_pub = kf.generatePublic(pub_spec)
-    ka = KeyAgreement.getInstance("ECDH")
-    ka.init(priv_key)
-    ka.doPhase(peer_pub, True)
-    shared = ka.generateSecret()
-    return bytes(shared)
-
-def aes_ccm_encrypt(key, nonce, plaintext, aad=b''):
-    tag_len = 8
-    L = 7
-    flags = ((1 if aad else 0) << 6) | (((tag_len - 2) // 2) << 3) | (L - 1)
-    b0 = bytes([flags]) + nonce + len(plaintext).to_bytes(L, 'big')
-    if aad:
-        if len(aad) < 0xFF00:
-            aad_len = struct.pack('>H', len(aad))
-        else:
-            aad_len = b'\xff\xfe' + struct.pack('>I', len(aad))
-        auth_data = b0 + aad_len + aad + plaintext
-    else:
-        auth_data = b0 + plaintext
-    aes = pyaes.AESModeOfOperationECB(key)
-    mac = bytearray(16)
-    for i in range(0, len(auth_data), 16):
-        block = auth_data[i:i+16]
-        if len(block) < 16:
-            block += b'\x00' * (16 - len(block))
-        mac = aes.encrypt(bytes(xor_bytes(mac, block)))
-    ctr_flags = L - 1
-    ctr_base = bytes([ctr_flags]) + nonce
-    keystream = b''
-    for j in range(1, (len(plaintext) + 15) // 16 + 1):
-        ctr_block = ctr_base + j.to_bytes(L, 'big')
-        keystream += aes.encrypt(ctr_block)
-    ciphertext = bytes(p ^ k for p, k in zip(plaintext, keystream))
-    ctr0 = ctr_base + (0).to_bytes(L, 'big')
-    enc_tag = aes.encrypt(ctr0)
-    tag = xor_bytes(mac[:tag_len], enc_tag[:tag_len])
-    return ciphertext + tag
-
-def aes_ccm_decrypt(key, nonce, ciphertext_tag, aad=b''):
-    tag_len = 8
-    ciphertext = ciphertext_tag[:-tag_len]
-    tag = ciphertext_tag[-tag_len:]
-    L = 7
-    ctr_flags = L - 1
-    ctr_base = bytes([ctr_flags]) + nonce
-    aes = pyaes.AESModeOfOperationECB(key)
-    keystream = b''
-    for j in range(1, (len(ciphertext) + 15) // 16 + 1):
-        ctr_block = ctr_base + j.to_bytes(L, 'big')
-        keystream += aes.encrypt(ctr_block)
-    plaintext = bytes(c ^ k for c, k in zip(ciphertext, keystream))
-    flags = ((1 if aad else 0) << 6) | (((tag_len - 2) // 2) << 3) | (L - 1)
-    b0 = bytes([flags]) + nonce + len(plaintext).to_bytes(L, 'big')
-    if aad:
-        if len(aad) < 0xFF00:
-            aad_len = struct.pack('>H', len(aad))
-        else:
-            aad_len = b'\xff\xfe' + struct.pack('>I', len(aad))
-        auth_data = b0 + aad_len + aad + plaintext
-    else:
-        auth_data = b0 + plaintext
-    mac = bytearray(16)
-    for i in range(0, len(auth_data), 16):
-        block = auth_data[i:i+16]
-        if len(block) < 16:
-            block += b'\x00' * (16 - len(block))
-        mac = aes.encrypt(bytes(xor_bytes(mac, block)))
-    ctr0 = ctr_base + (0).to_bytes(L, 'big')
-    enc_tag = aes.encrypt(ctr0)
-    expected_tag = xor_bytes(mac[:tag_len], enc_tag[:tag_len])
-    if tag != expected_tag:
-        raise ValueError("CCM tag mismatch")
-    return plaintext
-
-def xor_bytes(a,b): return bytes(x^y for x,y in zip(a,b))
-def crc8_854(data):
-    crc=0
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            if crc & 1: crc = (crc>>1)^0x8C
-            else: crc >>= 1
-    return crc
-
-def parse_status_frame(data):
-    if len(data) < 25 or data[0] != 0xAA or data[10] != 0xC0:
-        return None
-    state = {}
-    run_status = data[11]
-    state['power'] = bool(run_status & 0x01)
-    state['fault'] = bool(run_status & 0x80)
-    mode_map = {1: 'auto', 2: 'cool', 3: 'dry', 4: 'heat', 5: 'fan', 6: 'smart_dry'}
-    mode_val = (data[12] >> 5) & 0x07
-    state['mode'] = mode_map.get(mode_val, 'unknown')
-    temp_int = (data[12] & 0x0F) + 16
-    temp_half = (data[12] >> 4) & 0x01
-    state['set_temp'] = temp_int + 0.5 * temp_half
-    fan_map = {1: 'low', 2: 'medium', 3: 'high', 4: 'strong', 5: 'mute', 6: 'auto', 7: 'fixed'}
-    fan_val = data[13] & 0x7F
-    state['fan'] = fan_map.get(fan_val, 'unknown')
-    indoor_temp = (data[21] - 50) / 2.0
-    indoor_temp_frac = (data[25] >> 4) & 0x0F
-    state['indoor_temp'] = indoor_temp + indoor_temp_frac * 0.1
-    outdoor_temp = (data[22] - 50) / 2.0
-    outdoor_temp_frac = data[25] & 0x0F
-    state['outdoor_temp'] = outdoor_temp + outdoor_temp_frac * 0.1
-    return state
-
-class MideaProtocol: pass
 class PyScanListener(PythonJavaClass): pass
 class PyGattCallback(PythonJavaClass): pass
 
@@ -422,7 +312,6 @@ class PyGattCallback(PythonJavaClass): pass
 # ---------------- Native High-Performance Stream Server ----------------
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
-from PIL import Image
 
 class NativeMJPEGHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -434,20 +323,15 @@ class NativeMJPEGHandler(BaseHTTPRequestHandler):
             self.end_headers()
             
             while True:
-                global GLOBAL_RAW_FRAME
-                if GLOBAL_RAW_FRAME is None:
-                    time.sleep(0.01)
+                global GLOBAL_JPEG_BYTES
+                if GLOBAL_JPEG_BYTES is None:
+                    time.sleep(0.005)
                     continue
                 
                 try:
-                    pixels, size = GLOBAL_RAW_FRAME
-                    
-                    # 【核心优化点】移除 PIL 的 transpose(FLIP_TOP_BOTTOM) 和 rotate() 矩阵计算
-                    # 手机端只做纯粹的 RGBA 到 JPEG 的流化压缩，节省 80% 的手机 CPU 算力！
-                    img = Image.frombytes('RGBA', size, pixels)
-                    buf = io.BytesIO()
-                    img.convert('RGB').save(buf, format='JPEG', quality=60) 
-                    jpeg_bytes = buf.getvalue()
+                    # 【史诗级优化点】这里直接获取在原生层就已经被高速压缩好的原生 JPEG 字节块
+                    # Python 层不消耗哪怕 1% 的 CPU 去做 PIL 图像转换或矩阵翻转，彻底榨干硬件潜能！
+                    jpeg_bytes = bytes(GLOBAL_JPEG_BYTES)
                     
                     self.wfile.write(b'--frame\r\n')
                     self.wfile.write(b'Content-Type: image/jpeg\r\n')
@@ -455,7 +339,7 @@ class NativeMJPEGHandler(BaseHTTPRequestHandler):
                     self.wfile.write(jpeg_bytes)
                     self.wfile.write(b'\r\n')
                     
-                    time.sleep(0.033) # 限制推流在稳定的 ~30 FPS
+                    time.sleep(0.03) # 平稳维持在 ~30 FPS
                 except Exception:
                     break
         else:
@@ -498,25 +382,13 @@ class HualingACApp(App):
         self._log('App starting...')
         Clock.schedule_once(lambda dt: self.startup(), 0.2)
         
-        # 主线程只捞取原始像素尺寸，耗时极低
-        Clock.schedule_interval(self._fast_pixel_capture, 1.0 / 30.0)
+        # 【完全消灭轮询】彻底将先前消耗 CPU 的主线程定时采样器 _fast_pixel_capture 废弃
+        # Clock.schedule_interval(self._fast_pixel_capture, 1.0 / 30.0)
         
         t = threading.Thread(target=run_stream_server, daemon=True)
         t.start()
         
         return self.root_widget
-
-    def _fast_pixel_capture(self, dt):
-        global GLOBAL_RAW_FRAME
-        if self.is_paused:
-            return
-        try:
-            camera = self.root_widget.ids.camera
-            if camera and camera.play and camera.texture:
-                # 只保留像素和大小，不带旋转角度到后台处理
-                GLOBAL_RAW_FRAME = (camera.texture.pixels, camera.texture.size)
-        except Exception:
-            pass
 
     def on_brightness_value(self, instance, value):
         self._apply_professional_settings()
@@ -600,13 +472,40 @@ class HualingACApp(App):
         try:
             self._pending_start = True
             camera.play = True
-            Clock.schedule_once(lambda dt: self._apply_professional_settings(), 0.8)
+            # 延时挂载 PreviewCallback，等待 Kivy 完成底层的底层渲染目标初始化
+            Clock.schedule_once(lambda dt: self._setup_native_callback(), 1.0)
             self._set_status('Preview started')
         except Exception as e:
             self._set_status(f'Start failed: {e}')
             self._log(f'Start camera error: {e}')
         finally:
             self._pending_start = False
+
+    def _setup_native_callback(self):
+        """
+        核心黑魔法注入：获取 Kivy 底层相机的原生实例，挂载零轮询原生回调。
+        同时保留 Kivy 自身的渲染流程，确保手机屏幕画面完全正常，不黑屏。
+        """
+        global GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        camera = self.root_widget.ids.camera
+        if not camera.play:
+            return
+        try:
+            internal_camera = camera._camera
+            if internal_camera and hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
+                native_cam = internal_camera._android_camera
+                
+                # 同步宽高配置到全局变量中供回调转换使用
+                if camera.resolution:
+                    GLOBAL_CAM_WIDTH = int(camera.resolution[0])
+                    GLOBAL_CAM_HEIGHT = int(camera.resolution[1])
+                
+                # 【注入回调】告知底层 Android 硬件驱动：在把画面丢给屏幕的同时，克隆一份原生 NV21 丢进我们的 Python 接口
+                native_cam.setPreviewCallback(NATIVE_CALLBACK)
+                self._apply_professional_settings()
+                self._set_status('Native zero-polling callback linked successfully')
+        except Exception as e:
+            self._log(f'Failed to hook native callback: {e}')
 
     def _apply_professional_settings(self):
         camera = self.root_widget.ids.camera
@@ -680,11 +579,9 @@ class HualingACApp(App):
 
 def preview_html(response_obj):
     """
-    【完全重写表现层】利用网页客户端的浏览器内核和显卡能力去动态旋转/翻转视频。
-    手机端完全不需要做任何图像旋转处理！
+    【利用网页客户端的浏览器内核和显卡能力去动态旋转/翻转视频】
     """
     app_instance = App.get_running_app()
-    # 动态获取当前App界面的旋转角度设定
     current_angle = app_instance.preview_angle if app_instance else 270
 
     html_content = f"""<!DOCTYPE html>
@@ -694,16 +591,16 @@ def preview_html(response_obj):
     <title>Kivy Native Stream Live View</title>
     <style>
         body {{ margin: 0; background-color: #111; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; color: #fff; font-family: system-ui, sans-serif; }}
-        .container {{ position: relative; max-width: 95vw; max-height: 85vh; box-shadow: 0 4px 20px rgba(0,0,0,0.6); border-radius: 8px; overflow: hidden; }}
+        .container {{ position: relative; max-width: 100vw; max-height: 100vh; box-shadow: 0 4px 20px rgba(0,0,0,0.6); border-radius: 8px; overflow: hidden; }}
         
         img {{ 
             display: block; 
             width: 100%; 
             height: auto; 
-            max-height: 85vh; 
+            max-height: 100vh; 
             object-fit: contain; 
             background: #000;
-            /* 核心黑魔法：Kivy底层OpenGL默认上下颠倒，配合UI角度，使用网页GPU硬加速做翻转与旋转 */
+            /* 使用网页GPU硬加速做翻转与旋转 */
             transform: scaleY(-1) rotate({current_angle}deg);
             transform-origin: center;
         }}
