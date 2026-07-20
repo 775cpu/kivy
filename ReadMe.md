@@ -24,6 +24,10 @@ fatal: fetch-pack: invalid index-pack output
 cd /workspaces/kivy && latest_apk=$(basename "$(ls -1t bin/*.apk | head -1)") && git add -A && git commit -m "${latest_apk}" && git push 
 
 
+pillow pil打包需要 sudo apt-get update && sudo apt-get install -y cmake
+cryptography 需要 rustc
+
+
 
 buildozer android clean 会完全重新编译太慢了需要30分钟 。
 rm -rf /workspaces/kivy/.buildozer/android/platform/build-arm64-v8a/build/venv
