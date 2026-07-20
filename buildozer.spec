@@ -19,7 +19,7 @@ icon.adaptive_foreground.filename = %(source.dir)s/android_src/splash.png
 icon.adaptive_background.filename = %(source.dir)s/android_src/splash.png
 
 # 4. 开屏背景底色
-android.presplash_color = #F1F2F3
+android.presplash_color = #670721
 
 # ---------------------------------------------------------------------------
 # 💥 彻底干掉 4 张灰蓝色残留的核心参数（利用 Buildozer 编译后期覆盖机制）：
@@ -31,7 +31,7 @@ android.res_dir = %(source.dir)s/android_src/res
 
 version = 0.1
 requirements = hostpython3==3.11.9, python3==3.11.9, kivy, able_recipe, pyjnius, pyaes, dill
-android.permissions = INTERNET, BLUETOOTH, BLUETOOTH_ADMIN, BLUETOOTH_SCAN, BLUETOOTH_CONNECT, ACCESS_FINE_LOCATION
+android.permissions = INTERNET,BLUETOOTH_ADMIN,BLUETOOTH,BLUETOOTH_SCAN,BLUETOOTH_CONNECT,CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION,ACCESS_BACKGROUND_LOCATION,ACCESS_WIFI_STATE,CHANGE_WIFI_STATE,RECORD_AUDIO,POST_NOTIFICATIONS,READ_MEDIA_IMAGES,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO,REQUEST_INSTALL_PACKAGES,FOREGROUND_SERVICE,FOREGROUND_SERVICE_LOCATION,WAKE_LOCK,RECEIVE_BOOT_COMPLETED,READ_PHONE_STATE
 orientation = portrait
 fullscreen = 1
 android.archs = arm64-v8a
