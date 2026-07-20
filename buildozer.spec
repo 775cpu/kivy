@@ -5,7 +5,6 @@ package.domain = qgb
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-# 【清理门户】去掉空格，严格限制，防止污染
 source.exclude_dirs = androidBLE,bin,.buildozer
 
 # 1. 图标主参数：控制桌面图标 (生成 res/mipmap/icon.png)
@@ -30,7 +29,7 @@ android.output_res_dir = %(source.dir)s/android_src/res
 android.res_dir = %(source.dir)s/android_src/res
 
 version = 0.1
-requirements = hostpython3==3.11.9, python3==3.11.9, kivy, able_recipe, pyjnius, pyaes, dill
+requirements= hostpython3==3.11.9,python3==3.11.9,kivy,able_recipe,pyjnius,pyaes,pillow,ipython,dill
 android.permissions = INTERNET,BLUETOOTH_ADMIN,BLUETOOTH,BLUETOOTH_SCAN,BLUETOOTH_CONNECT,CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION,ACCESS_BACKGROUND_LOCATION,ACCESS_WIFI_STATE,CHANGE_WIFI_STATE,RECORD_AUDIO,POST_NOTIFICATIONS,READ_MEDIA_IMAGES,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO,REQUEST_INSTALL_PACKAGES,FOREGROUND_SERVICE,FOREGROUND_SERVICE_LOCATION,WAKE_LOCK,RECEIVE_BOOT_COMPLETED,READ_PHONE_STATE
 orientation = portrait
 fullscreen = 1
