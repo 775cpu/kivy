@@ -1,5 +1,8 @@
 # Gradle / Android build artifacts
-.gradle/
+.gradle/**/executionHistory/executionHistory.bin
+.gradle/**/fileHashes/fileHashes.bin
+.gradle/**/buildOutputCleanup/cache.properties
+.gradle/**/buildOutputCleanup/outputFiles.bin
 .gradle/**/executionHistory.lock
 .gradle/**/fileHashes.lock
 .gradle/**/buildOutputCleanup.lock
