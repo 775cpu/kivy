@@ -694,55 +694,71 @@ class HualingACApp(App):
         self.request_permissions()
 
     def _required_permissions(self):
-        from android.os import Build
-        sdk = int(Build.VERSION.SDK_INT)
-        base_perms = [
-            "android.permission.INTERNET",
-            "android.permission.CAMERA",
-            "android.permission.RECORD_AUDIO",
-            "android.permission.WAKE_LOCK",
-            "android.permission.POST_NOTIFICATIONS",
-            "android.permission.ACCESS_WIFI_STATE",
-            "android.permission.CHANGE_WIFI_STATE",
-            "android.permission.REQUEST_INSTALL_PACKAGES",
-            "android.permission.FOREGROUND_SERVICE",
-            "android.permission.READ_PHONE_STATE",
-            "android.permission.RECEIVE_BOOT_COMPLETED"
-        ]
+        """
+        返回应用需要【动态弹窗申请】的 Android 危险权限列表。
+        已自动剔除 INTERNET、WAKE_LOCK 等安装时自动授予的普通权限，避免请求被系统拒绝。
+        """
+        try:
+            from android import ANDROID_VERSION
+            sdk = ANDROID_VERSION
+        except ImportError:
+            from jnius import autoclass
+            VERSION = autoclass('android.os.Build$VERSION')
+            sdk = VERSION.SDK_INT
 
-        # 存储权限分版本适配
-        if sdk >= 33:
-            media_perms = [
+        # 存储真正需要动态弹窗的“危险权限”
+        dynamic_perms = []
+
+        # ==========================================
+        # 1. 基础危险权限（不分版本，都需要动态申请）
+        # ==========================================
+        dynamic_perms.append("android.permission.CAMERA")
+        dynamic_perms.append("android.permission.RECORD_AUDIO")
+        dynamic_perms.append("android.permission.READ_PHONE_STATE")
+
+        # ==========================================
+        # 2. 存储权限适配
+        # ==========================================
+        if sdk >= 33:  # Android 13+
+            dynamic_perms.extend([
                 "android.permission.READ_MEDIA_IMAGES",
                 "android.permission.READ_MEDIA_VIDEO",
-                "android.permission.READ_MEDIA_AUDIO"
-            ]
-        else:
-            media_perms = [
+                "android.permission.READ_MEDIA_AUDIO",
+                "android.permission.POST_NOTIFICATIONS"  # 通知权限在 API 33 成为危险权限
+            ])
+        else:  # Android 12 及以下
+            dynamic_perms.extend([
                 "android.permission.READ_EXTERNAL_STORAGE",
                 "android.permission.WRITE_EXTERNAL_STORAGE"
-            ]
+            ])
 
-        # 蓝牙 + 定位分版本
-        if sdk >= 31:  # Android 12+ SDK31
-            bt_location_perms = [
+        # ==========================================
+        # 3. 蓝牙与定位权限适配（影响蓝牙连接的核心）
+        # ==========================================
+        if sdk >= 31:  # Android 12+
+            # Android 12 引入了独立的蓝牙运行时权限
+            dynamic_perms.extend([
                 "android.permission.BLUETOOTH_SCAN",
-                "android.permission.BLUETOOTH_CONNECT",
+                "android.permission.BLUETOOTH_CONNECT"
+            ])
+            # 注意：如果你的蓝牙连接需要获取地理位置，或者为了兼容某些低功耗蓝牙(BLE)设备，Android 12+ 依然建议加上前台定位
+            dynamic_perms.append("android.permission.ACCESS_FINE_LOCATION")
+        else:  # Android 11 及以下
+            # 老版本中，蓝牙扫描强依赖定位权限
+            dynamic_perms.extend([
                 "android.permission.ACCESS_FINE_LOCATION",
-                "android.permission.ACCESS_BACKGROUND_LOCATION"
-            ]
-        else:  # Android11及以下
-            bt_location_perms = [
-                "android.permission.ACCESS_FINE_LOCATION",
-                "android.permission.ACCESS_COARSE_LOCATION",
-                "android.permission.BLUETOOTH",
-                "android.permission.BLUETOOTH_ADMIN"
-            ]
+                "android.permission.ACCESS_COARSE_LOCATION"
+            ])
+            # 此时的 BLUETOOTH 和 BLUETOOTH_ADMIN 是普通权限，不需要加到动态列表里！
 
-        # 合并全部权限返回
-        all_perms = base_perms + media_perms + bt_location_perms
-        return all_perms
+        # ==========================================
+        # 避坑指南：关于 ACCESS_BACKGROUND_LOCATION（后台定位）
+        # ==========================================
+        # 如果你的应用确实需要在后台默默定位/扫描蓝牙，请不要放在这里！
+        # 你必须在用户同意了上面的“前台定位”后，再单独写一个逻辑去申请后台定位。
+        # 如果不需要后台定位，直接在 buildozer.spec 和这里都删掉它。
 
+        return dynamic_perms                    
     def request_permissions(self):
         perms = self._required_permissions()
         missing = [p for p in perms if self.activity.checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED]

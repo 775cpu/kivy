@@ -19,7 +19,7 @@ icon.adaptive_foreground.filename = %(source.dir)s/android_src/splash.png
 icon.adaptive_background.filename = %(source.dir)s/android_src/splash.png
 
 # 4. 开屏背景底色
-android.presplash_color = #670721
+android.presplash_color = #672105
 
 # ---------------------------------------------------------------------------
 # 💥 彻底干掉 4 张灰蓝色残留的核心参数（利用 Buildozer 编译后期覆盖机制）：
