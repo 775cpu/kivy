@@ -29,10 +29,13 @@ android.output_res_dir = %(source.dir)s/android_src/res
 android.res_dir = %(source.dir)s/android_src/res
 
 version = 0.1
-requirements = hostpython3==3.11.9,python3==3.11.9,numpy,kivy,able_recipe,pyjnius,pyaes,pillow,ipython,dill,onnxruntime
+requirements = hostpython3==3.11.9,python3==3.11.9,numpy,kivy,able_recipe,pyjnius,pyaes,pillow,ipython,dill,tflite-runtime
 p4a.local_recipes = %(source.dir)s/android_src
-# opencv_python opencv_python_headless 会造成体积巨大 cv2.abi3.so  (70.45 MB)
+# opencv_python opencv_python_headless 会造成体积巨大 cv2.abi3.so  (70.45 MB)，
+# onnxruntime 动态库（.so 文件）直接打包进了 ARM64（手机 CPU 架构）的 APK 里。当 Android 手机（ARM64）尝试加载这个动态库时，系统的 dlopen 识别到 CPU 架构不匹配（e_machine: 62 代表 x86_64，而 ARM64 应该是 183），从而拒绝加载
 android.pip_upgrade = False
+
+
 android.permissions = INTERNET,BLUETOOTH_ADMIN,BLUETOOTH,BLUETOOTH_SCAN,BLUETOOTH_CONNECT,CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION,ACCESS_BACKGROUND_LOCATION,ACCESS_WIFI_STATE,CHANGE_WIFI_STATE,RECORD_AUDIO,POST_NOTIFICATIONS,READ_MEDIA_IMAGES,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO,REQUEST_INSTALL_PACKAGES,FOREGROUND_SERVICE,FOREGROUND_SERVICE_LOCATION,WAKE_LOCK,RECEIVE_BOOT_COMPLETED,READ_PHONE_STATE
 orientation = portrait
 fullscreen = 1
