@@ -26,6 +26,7 @@ cd /workspaces/kivy && latest_apk=$(basename "$(ls -1t bin/*.apk | head -1)") &&
 
 pillow pil打包需要 sudo apt-get update && sudo apt-get install -y cmake
 cryptography 需要 rustc
+不要在手机端安装整个 ultralytics 训练/推理框架。在电脑上把 YOLO 模型（.pt）导出为 ONNX（.onnx）或 TFLite（.tflite）格式。在 Android App 中，只用 onnxruntime 或 tflite-runtime 加载模型进行推理，体积只有几 MB 到十几 MB，且运行速度极快。
 
 
 
