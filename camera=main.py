@@ -2,16 +2,18 @@
 import rpc
 rpc_server, rpc_thread = rpc.start_rpc_server(port=1133, key='', globals=globals(), locals=locals())
 
-from collections import deque
 import os
 import traceback
 import hashlib
-import hmac as hmac_lib
 import random
 import struct
 import pyaes
 import threading
 import time
+import io
+
+from collections import deque
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -40,20 +42,20 @@ UUID = autoclass('java.util.UUID')
 String = autoclass('java.lang.String')
 BleBridge = autoclass('org.qgb.ble.BleBridge')
 KeyPairGenerator = autoclass('java.security.KeyPairGenerator')
-KeyAgreement = javax_crypto = autoclass('javax.crypto.KeyAgreement')
+KeyAgreement = autoclass('javax.crypto.KeyAgreement')
 KeyFactory = autoclass('java.security.KeyFactory')
 ECGenParameterSpec = autoclass('java.security.spec.ECGenParameterSpec')
 ECPublicKeySpec = autoclass('java.security.spec.ECPublicKeySpec')
 ECPoint = autoclass('java.security.spec.ECPoint')
 BigInteger = autoclass('java.math.BigInteger')
 
-# 新增 Android 原生高性能图像处理类
+# Android 原生高性能图像处理类
 YuvImage = autoclass('android.graphics.YuvImage')
 Rect = autoclass('android.graphics.Rect')
 ImageFormat = autoclass('android.graphics.ImageFormat')
 ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
 
-# 全局高能数据流载体：直接存储原生 JPEG 字节块
+# 全局数据流载体
 GLOBAL_JPEG_BYTES = None 
 GLOBAL_CAM_WIDTH = 640
 GLOBAL_CAM_HEIGHT = 480
@@ -68,30 +70,19 @@ class AndroidPreviewCallback(PythonJavaClass):
 
     @java_method('([BLandroid/hardware/Camera;)V')
     def onPreviewFrame(self, data, camera):
-        """
-        Android 原生硬回调，完全脱离 Kivy Clock 定时器。
-        只要底层硬件采集完毕，直接注入该方法。
-        """
         global GLOBAL_JPEG_BYTES, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
         try:
-            # 1. 瞬间锁定当前配置的分辨率大小
             w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
-            
-            # 2. 利用 Android 原生极速的 YUV 编码核心（NV21 转 JPEG）
-            # 不经过 Python 慢速循环，直接在原生内存层完成高效压缩
             yuv = YuvImage(data, ImageFormat.NV21, w, h, None)
             bos = ByteArrayOutputStream()
-            yuv.compressToJpeg(Rect(0, 0, w, h), 70, bos) # 图像质量设为70平衡带宽与画质
-            
-            # 3. 将生产出的原生 JPEG 字节直接送入全局推流缓存
+            yuv.compressToJpeg(Rect(0, 0, w, h), 70, bos)
             GLOBAL_JPEG_BYTES = bos.toByteArray()
         except Exception as e:
             print(f"[NativeCallbackError] {e}")
 
-# 初始化原生监听回调实例
 NATIVE_CALLBACK = AndroidPreviewCallback()
 
-# ---------- Fullscreen Camera Layout (FloatLayout) ----------
+# ---------- UI KV Definition ----------
 KV = r'''
 <RootWidget>:
     canvas.before:
@@ -304,18 +295,10 @@ class PermissionCallback(PythonJavaClass):
     def onRequestPermissionsResult(self, requestCode, permissions, grantResults):
         Clock.schedule_once(lambda dt: self.owner._on_permissions_result(permissions, grantResults), 0)
 
-
-class PyScanListener(PythonJavaClass): pass
-class PyGattCallback(PythonJavaClass): pass
-
-
-# ---------------- Native High-Performance Stream Server ----------------
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import io
-
+# ---------- Native High-Performance Stream Server ----------
 class NativeMJPEGHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/mjpeg_stream':
+        if self.path.startswith('/mjpeg_stream'):
             self.send_response(200)
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
             self.send_header('Cache-Control', 'no-cache, private')
@@ -325,26 +308,36 @@ class NativeMJPEGHandler(BaseHTTPRequestHandler):
             while True:
                 global GLOBAL_JPEG_BYTES
                 if GLOBAL_JPEG_BYTES is None:
-                    time.sleep(0.005)
+                    time.sleep(0.05)
                     continue
                 
                 try:
-                    # 【史诗级优化点】这里直接获取在原生层就已经被高速压缩好的原生 JPEG 字节块
-                    # Python 层不消耗哪怕 1% 的 CPU 去做 PIL 图像转换或矩阵翻转，彻底榨干硬件潜能！
                     jpeg_bytes = bytes(GLOBAL_JPEG_BYTES)
-                    
                     self.wfile.write(b'--frame\r\n')
                     self.wfile.write(b'Content-Type: image/jpeg\r\n')
                     self.wfile.write(f'Content-Length: {len(jpeg_bytes)}\r\n\r\n'.encode())
                     self.wfile.write(jpeg_bytes)
                     self.wfile.write(b'\r\n')
-                    
-                    time.sleep(0.03) # 平稳维持在 ~30 FPS
+                    time.sleep(0.03) 
                 except Exception:
                     break
+        
+        elif self.path == '/' or self.path == '/index.html':
+            preview_html(self)
+        
         else:
             self.send_response(404)
             self.end_headers()
+
+    def set_header(self, key, value):
+        self.send_header(key, value)
+        
+    def set_data(self, data):
+        self.end_headers()
+        self.wfile.write(data)
+
+    def set_status(self, code):
+        self.send_response(code)
 
     def log_message(self, format, *args):
         pass 
@@ -356,7 +349,6 @@ def run_stream_server():
     except Exception as e:
         print(f"[StreamServer] Error: {e}")
 
-
 # ---------- Main Application Deck ----------
 class HualingACApp(App):
     title_text = StringProperty('Camera Preview')
@@ -364,7 +356,7 @@ class HualingACApp(App):
     log_text = StringProperty('')
     flash_mode_text = StringProperty('Flash: Off')
     
-    preview_angle = NumericProperty(270)
+    preview_angle = NumericProperty(270)   # 默认270度，竖屏正向
     brightness_value = NumericProperty(0)
     chroma_value = NumericProperty(3)
 
@@ -382,9 +374,6 @@ class HualingACApp(App):
         self._log('App starting...')
         Clock.schedule_once(lambda dt: self.startup(), 0.2)
         
-        # 【完全消灭轮询】彻底将先前消耗 CPU 的主线程定时采样器 _fast_pixel_capture 废弃
-        # Clock.schedule_interval(self._fast_pixel_capture, 1.0 / 30.0)
-        
         t = threading.Thread(target=run_stream_server, daemon=True)
         t.start()
         
@@ -399,6 +388,32 @@ class HualingACApp(App):
     def set_preview_angle(self, angle):
         self.preview_angle = angle
         self._set_status(f'Preview orientation locked to {angle} deg')
+
+    def get_supported_resolutions(self):
+        """返回摄像头支持的分辨率字符串，格式如 '[(w,h),...]' """
+        try:
+            cam = self.root_widget.ids.camera
+            if cam._camera and hasattr(cam._camera, '_android_camera') and cam._camera._android_camera is not None:
+                sizes = cam._camera._android_camera.getParameters().getSupportedPreviewSizes()
+                res = [(s.width, s.height) for s in sizes]
+                return str(res)
+        except Exception as e:
+            self._log(f'Failed to get resolutions: {e}')
+        return '[(640, 480)]'
+
+    def set_preview_resolution(self, w, h):
+        global GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        if w == GLOBAL_CAM_WIDTH and h == GLOBAL_CAM_HEIGHT:
+            return
+        GLOBAL_CAM_WIDTH = w
+        GLOBAL_CAM_HEIGHT = h
+        self._set_status(f'Resolution set to {w}x{h}, restarting preview...')
+        camera = self.root_widget.ids.camera
+        if camera.play:
+            camera.play = False
+            Clock.schedule_once(lambda dt: self._start_camera_preview(), 0.6)
+        else:
+            self._start_camera_preview()
 
     def _log(self, msg):
         print(f'[CameraApp] {msg}')
@@ -472,7 +487,9 @@ class HualingACApp(App):
         try:
             self._pending_start = True
             camera.play = True
-            # 延时挂载 PreviewCallback，等待 Kivy 完成底层的底层渲染目标初始化
+            # 设置底层显示方向
+            Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.6)
+            # 设置原生回调和预览尺寸
             Clock.schedule_once(lambda dt: self._setup_native_callback(), 1.0)
             self._set_status('Preview started')
         except Exception as e:
@@ -481,11 +498,23 @@ class HualingACApp(App):
         finally:
             self._pending_start = False
 
+    def _set_camera_orientation(self):
+        camera = self.root_widget.ids.camera
+        if not camera.play:
+            return
+        try:
+            internal_camera = camera._camera
+            if internal_camera is None:
+                Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.3)
+                return
+            # 后置摄像头通常需要旋转90°，前置270°才能与UI的旋转角度配合得到正向预览
+            orientation = 90 if camera.index == 0 else 270
+            internal_camera.setDisplayOrientation(orientation)
+            self._log(f'Camera orientation set to {orientation}°')
+        except Exception as e:
+            self._log(f'Set orientation failed: {e}')
+
     def _setup_native_callback(self):
-        """
-        核心黑魔法注入：获取 Kivy 底层相机的原生实例，挂载零轮询原生回调。
-        同时保留 Kivy 自身的渲染流程，确保手机屏幕画面完全正常，不黑屏。
-        """
         global GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
         camera = self.root_widget.ids.camera
         if not camera.play:
@@ -495,15 +524,18 @@ class HualingACApp(App):
             if internal_camera and hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
                 native_cam = internal_camera._android_camera
                 
-                # 同步宽高配置到全局变量中供回调转换使用
-                if camera.resolution:
-                    GLOBAL_CAM_WIDTH = int(camera.resolution[0])
-                    GLOBAL_CAM_HEIGHT = int(camera.resolution[1])
+                # 设置预览尺寸为当前的全局宽高
+                params = native_cam.getParameters()
+                w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+                try:
+                    params.setPreviewSize(w, h)
+                    native_cam.setParameters(params)
+                except Exception as e:
+                    self._log(f'Failed to set preview size {w}x{h}: {e}')
                 
-                # 【注入回调】告知底层 Android 硬件驱动：在把画面丢给屏幕的同时，克隆一份原生 NV21 丢进我们的 Python 接口
                 native_cam.setPreviewCallback(NATIVE_CALLBACK)
                 self._apply_professional_settings()
-                self._set_status('Native zero-polling callback linked successfully')
+                self._set_status(f'Native callback linked at {w}x{h}')
         except Exception as e:
             self._log(f'Failed to hook native callback: {e}')
 
@@ -549,7 +581,7 @@ class HualingACApp(App):
             camera.play = False
             self._set_status('Preview stopped')
         else:
-            self._start_camera_preview()
+            Clock.schedule_once(lambda dt: self._start_camera_preview(), 0.6)
 
     def switch_camera(self):
         camera = self.root_widget.ids.camera
@@ -576,57 +608,147 @@ class HualingACApp(App):
         self.flash_mode_text = f'Flash: {mode_names[self.flash_mode]}'
         self._apply_professional_settings()
 
-
 def preview_html(response_obj):
-    """
-    【利用网页客户端的浏览器内核和显卡能力去动态旋转/翻转视频】
-    """
     app_instance = App.get_running_app()
     current_angle = app_instance.preview_angle if app_instance else 270
+    h = html_content.replace("__INITIAL_ANGLE__", str(current_angle))
+    response_obj.set_header("Content-Type", "text/html; charset=utf-8")
+    response_obj.set_data(h.encode('utf-8'))
 
-    html_content = f"""<!DOCTYPE html>
+html_content = r"""
+<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Kivy Native Stream Live View</title>
     <style>
-        body {{ margin: 0; background-color: #111; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; color: #fff; font-family: system-ui, sans-serif; }}
-        .container {{ position: relative; max-width: 100vw; max-height: 100vh; box-shadow: 0 4px 20px rgba(0,0,0,0.6); border-radius: 8px; overflow: hidden; }}
-        
-        img {{ 
-            display: block; 
-            width: 100%; 
-            height: auto; 
-            max-height: 100vh; 
-            object-fit: contain; 
-            background: #000;
-            /* 使用网页GPU硬加速做翻转与旋转 */
-            transform: scaleY(-1) rotate({current_angle}deg);
-            transform-origin: center;
-        }}
+        body { margin: 0; background-color: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+        #native_stream { width: 100vw; height: 100vh; object-fit: contain; transform-origin: center; transition: transform 0.2s; }
+        .controls { position: fixed; bottom: 20px; left: 0; right: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; z-index: 100; padding: 0 10px; }
+        button { background: rgba(255,255,255,0.2); color: white; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; backdrop-filter: blur(5px); }
+        .settings { background: rgba(0,0,0,0.6); padding: 5px; border-radius: 8px; display: flex; gap: 5px; align-items: center; }
+        select { background: rgba(255,255,255,0.1); border: 1px solid #555; color: white; border-radius: 4px; padding: 5px; }
     </style>
 </head>
 <body>
-    <h3 style="margin-bottom: 10px;">Kivy Live Video Deck (GPU Accelerated)</h3>
-    <div class="container">
-        <img id="native_stream" src="" alt="Connecting to high performance stream...">
+    <div class="controls">
+        <button onclick="rotate(-90)">↺</button>
+        <button onclick="rotate(90)">↻</button>
+        <button onclick="toggleFullscreen()">FS</button>
+        <button onclick="window.location.reload()" style="background: rgba(200,0,0,0.5);">Refresh</button>
+        <div class="settings">
+            <select id="resolutionSelect"></select>
+            <button onclick="setResolution()" style="background: rgba(0,100,200,0.5);">Apply</button>
+        </div>
     </div>
+    
     <script>
-        document.getElementById('native_stream').src = window.location.protocol + '//' + window.location.hostname + ':1134/mjpeg_stream';
+        let angle = __INITIAL_ANGLE__;
+        const rpcPort = "1133";
+        const streamUrl = window.location.protocol + '//' + window.location.hostname + ':1134/mjpeg_stream';
+        
+        const defaultResolutions = [
+            { w: 320, h: 240 },
+            { w: 640, h: 480 },
+            { w: 800, h: 600 },
+            { w: 1024, h: 768 },
+            { w: 1280, h: 720 },
+            { w: 1280, h: 960 },
+            { w: 1920, h: 1080 },
+            { w: 2592, h: 1944 },
+            { w: 3840, h: 2160 }
+        ];
+
+        async function fetchSupportedResolutions() {
+            try {
+                const resp = await fetch(`http://${window.location.hostname}:${rpcPort}/r=app.get_supported_resolutions()`);
+                if (resp.ok) {
+                    const text = await resp.text();
+                    const matches = text.match(/\((\d+)\s*,\s*(\d+)\)/g);
+                    if (matches) {
+                        return matches.map(m => {
+                            const [w, h] = m.replace(/[()]/g, '').split(',').map(Number);
+                            return { w, h };
+                        });
+                    }
+                }
+            } catch (e) {
+                console.warn("Failed to fetch supported resolutions", e);
+            }
+            return defaultResolutions;
+        }
+
+        function populateResolutionSelect(resolutions, currentW, currentH) {
+            const select = document.getElementById('resolutionSelect');
+            select.innerHTML = '';
+            resolutions.forEach(({w, h}) => {
+                const option = document.createElement('option');
+                option.value = `${w},${h}`;
+                option.textContent = `${w} x ${h}`;
+                if (w === currentW && h === currentH) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+            });
+        }
+
+        async function init() {
+            let currentW = 640, currentH = 480;
+            try {
+                const resp = await fetch(`http://${window.location.hostname}:${rpcPort}/r=app.preview_angle-180,GLOBAL_CAM_WIDTH,GLOBAL_CAM_HEIGHT`);
+                const text = await resp.text();
+                const vals = text.replace(/[()]/g, '').split(',').map(s => parseInt(s.trim()));
+                angle = vals[0] || 270;
+                currentW = vals[1] || 640;
+                currentH = vals[2] || 480;
+            } catch(e) { 
+                console.error("RPC Init Error", e); 
+            }
+            
+            const resolutions = await fetchSupportedResolutions();
+            populateResolutionSelect(resolutions, currentW, currentH);
+            
+            startStream();
+        }
+
+        function startStream() {
+            const oldImg = document.getElementById('native_stream');
+            if (oldImg) oldImg.remove();
+            
+            const newImg = document.createElement('img');
+            newImg.id = 'native_stream';
+            newImg.style.cssText = "width: 100vw; height: 100vh; object-fit: contain; transform-origin: center; transition: transform 0.2s;";
+            newImg.style.transform = `rotate(${angle}deg) scaleY(-1)`;
+            newImg.src = streamUrl + "?t=" + new Date().getTime();
+            newImg.onerror = () => setTimeout(startStream, 2000);
+            document.body.prepend(newImg);
+        }
+
+        async function setResolution() {
+            const select = document.getElementById('resolutionSelect');
+            const [w, h] = select.value.split(',').map(Number);
+            if(!w || !h) return;
+            await fetch(`http://${window.location.hostname}:${rpcPort}/r=app.set_preview_resolution(${w},${h})`);
+            console.log(`Resolution set to ${w}x${h}`);
+        }
+
+        function rotate(deg) {
+            angle = (angle + deg) % 360;
+            const img = document.getElementById('native_stream');
+            if (img) img.style.transform = `rotate(${angle}deg) scaleY(-1)`;
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+            else document.exitFullscreen();
+        }
+
+        init();
     </script>
 </body>
 </html>
 """
-    response_obj.set_header("Content-Type", "text/html; charset=utf-8")
-    response_obj.set_data(html_content.encode('utf-8'))
-
-
-def get_camera_frameBytes(response_obj):
-    response_obj.set_status(200)
-    response_obj.set_header("Content-Type", "text/plain")
-    response_obj.set_data(b"Deprecated. Switched to native streaming at port 1134.")
-    return "Redirected"
-
 
 if __name__ == '__main__':
     app = HualingACApp()
