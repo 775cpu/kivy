@@ -1,3 +1,12 @@
+'''
+rm -rf .buildozer/android/platform/build-arm64-v8a/build/other_builds/numpy
+rm -rf .buildozer/android/platform/build-arm64-v8a/packages/numpy
+rm -rf .buildozer/android/platform/build-arm64-v8a/build/python-installs/hualing
+rm -rf .buildozer/android/platform/build-arm64-v8a/dists/hualing
+rm -rf .buildozer/android/platform/build-arm64-v8a/build/venv
+unset CXXFLAGS CFLAGS NPY_DISABLE_SVML BLAS LAPACK ATLAS LDFLAGS
+./build.sh
+'''
 import os
 import re
 from pythonforandroid.recipe import PythonRecipe, Recipe
@@ -7,8 +16,10 @@ class NumpyRecipe(PythonRecipe):
     url = 'https://github.com/numpy/numpy/releases/download/v{version}/numpy-{version}.tar.gz'
     depends = ['python3', 'hostpython3', 'setuptools', 'cython']
 
-    def prebuild_arm64_v8a(self):
-        build_dir = self.get_build_dir('arm64-v8a')
+    # 改为通用 arch 回调，适配 arm64-v8a, armeabi-v7a 等任意架构
+    def prebuild_arch(self, arch):
+        super().prebuild_arch(arch)
+        build_dir = self.get_build_dir(arch.arch)
         setup_py = os.path.join(build_dir, 'numpy', 'core', 'setup.py')
         if not os.path.exists(setup_py):
             return
@@ -20,7 +31,7 @@ class NumpyRecipe(PythonRecipe):
         if new_content != content:
             with open(setup_py, 'w') as f:
                 f.write(new_content)
-            print('[INFO] Math check function stubbed.')
+            print(f'[INFO] [{arch.arch}] Math check function stubbed.')
 
     def get_recipe_env(self, arch, **kwargs):
         env = super().get_recipe_env(arch, **kwargs)
