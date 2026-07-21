@@ -29,7 +29,7 @@ android.output_res_dir = %(source.dir)s/android_src/res
 android.res_dir = %(source.dir)s/android_src/res
 
 version = 0.1
-requirements= hostpython3==3.11.9,python3==3.11.9,numpy,kivy,able_recipe,pyjnius,pyaes,opencv-python,ultralytics,pillow,ipython,dill
+requirements= hostpython3==3.11.9,python3==3.11.9,numpy,kivy,able_recipe,pyjnius,pyaes,opencv-python-headless,ultralytics,pillow,ipython,dill
 p4a.local_recipes = %(source.dir)s/android_src
 android.pip_upgrade = False
 android.permissions = INTERNET,BLUETOOTH_ADMIN,BLUETOOTH,BLUETOOTH_SCAN,BLUETOOTH_CONNECT,CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION,ACCESS_BACKGROUND_LOCATION,ACCESS_WIFI_STATE,CHANGE_WIFI_STATE,RECORD_AUDIO,POST_NOTIFICATIONS,READ_MEDIA_IMAGES,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO,REQUEST_INSTALL_PACKAGES,FOREGROUND_SERVICE,FOREGROUND_SERVICE_LOCATION,WAKE_LOCK,RECEIVE_BOOT_COMPLETED,READ_PHONE_STATE
