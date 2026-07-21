@@ -29,7 +29,7 @@ android.output_res_dir = %(source.dir)s/android_src/res
 android.res_dir = %(source.dir)s/android_src/res
 
 version = 0.1
-requirements= hostpython3==3.11.9,python3==3.11.9,numpy,kivy,able_recipe,pyjnius,pyaes,opencv,ultralytics,pillow,ipython,dill
+requirements = hostpython3==3.11.9,python3==3.11.9,numpy,kivy,able_recipe,pyjnius,pyaes,pillow,ipython,dill,onnxruntime
 p4a.local_recipes = %(source.dir)s/android_src
 # opencv_python opencv_python_headless 会造成体积巨大 cv2.abi3.so  (70.45 MB)
 android.pip_upgrade = False
