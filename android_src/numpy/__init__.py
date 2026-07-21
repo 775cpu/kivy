@@ -1,6 +1,6 @@
-from pythonforandroid.recipe import PythonRecipe
 import os
 import re
+from pythonforandroid.recipe import PythonRecipe, Recipe
 
 class NumpyRecipe(PythonRecipe):
     version = '1.24.3'
@@ -25,19 +25,34 @@ class NumpyRecipe(PythonRecipe):
     def get_recipe_env(self, arch, **kwargs):
         env = super().get_recipe_env(arch, **kwargs)
 
-        env['_PYTHON_HOST_PLATFORM'] = f'linux-{arch.arch}'
+        # 交叉编译标识
+        env['_PYTHON_HOST_PLATFORM'] = arch.command_prefix
+
+        # 禁用高级指令集和外部 BLAS
         env['NPY_DISABLE_SVML'] = '1'
         env['BLAS'] = 'None'
         env['LAPACK'] = 'None'
         env['ATLAS'] = 'None'
 
-        # 关键修复：仅添加 -lm 解决 exp2f 等数学符号缺失
-        env['LDFLAGS'] = (env.get('LDFLAGS', '') + ' -lm').strip()
+        # C++17 和 NDK 浮点异常标志修正
+        fix_flags = '-D_LIBCPP_DISABLE_AVAILABILITY -fno-trapping-math -Wno-unsupported-floating-point-opt'
+        env['CFLAGS'] = f"{env.get('CFLAGS', '')} {fix_flags}".strip()
+        env['CXXFLAGS'] = f"{env.get('CXXFLAGS', '')} -std=c++17 {fix_flags}".strip()
 
-        cxxflags = env.get('CXXFLAGS', '') or ''
-        cflags = env.get('CFLAGS', '') or ''
-        env['CXXFLAGS'] = f'{cxxflags} -std=c++17 -D_LIBCPP_DISABLE_AVAILABILITY'.strip()
-        env['CFLAGS'] = f'{cflags} -D_LIBCPP_DISABLE_AVAILABILITY'.strip()
+        # 动态查找 libpython3.11 目录
+        py_recipe = Recipe.get_recipe('python3', self.ctx)
+        py_build_dir = py_recipe.get_build_dir(arch.arch)
+        py_lib_dir1 = os.path.join(py_build_dir, 'android-build')
+        py_lib_dir2 = os.path.join(py_build_dir, 'android-build', 'android-root', 'lib')
+        libs_coll_dir = self.ctx.get_libs_dir(arch.arch)
+
+        py_ver = '.'.join(self.ctx.python_recipe.version.split('.')[:2])
+
+        # 同时链接数学库和 Python 库（解决 exp2f 和 PyLong_Type）
+        env['LDFLAGS'] = (env.get('LDFLAGS', '') +
+                          f' -L{py_lib_dir1} -L{py_lib_dir2} -L{libs_coll_dir}'
+                          f' -lpython{py_ver} -lm').strip()
+
         return env
 
 recipe = NumpyRecipe()
