@@ -2,25 +2,25 @@
 import rpc
 rpc_server, rpc_thread = rpc.start_rpc_server(port=1133, key='', globals=globals(), locals=locals())
 
+import os, traceback, hashlib, random, struct, pyaes, threading, time, io
 from collections import deque
-import os
-import traceback
-import hashlib
-import hmac as hmac_lib
-import random
-import struct
-import pyaes
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.lang import Builder
 from kivy.metrics import dp
-from kivy.properties import StringProperty, BooleanProperty, NumericProperty
+from kivy.properties import StringProperty, BooleanProperty, NumericProperty, ListProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
+from kivy.uix.camera import Camera
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.slider import Slider
+from kivy.uix.widget import Widget
+from kivy.graphics import Color, Line, Rectangle
 
 from jnius import autoclass, PythonJavaClass, java_method, cast
 
@@ -42,184 +42,274 @@ ECPublicKeySpec = autoclass('java.security.spec.ECPublicKeySpec')
 ECPoint = autoclass('java.security.spec.ECPoint')
 BigInteger = autoclass('java.math.BigInteger')
 
+# Android 原生图像处理类
+YuvImage = autoclass('android.graphics.YuvImage')
+Rect = autoclass('android.graphics.Rect')
+ImageFormat = autoclass('android.graphics.ImageFormat')
+ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+
+# 全局帧数据（线程安全）
+GLOBAL_JPEG_BYTES = None
+GLOBAL_YUV_DATA = None
+GLOBAL_CAM_WIDTH = 640
+GLOBAL_CAM_HEIGHT = 480
+DETECTION_RESULTS = []
+FPS = 0
+
+# 线程锁
+yuv_lock = threading.Lock()
+jpeg_lock = threading.Lock()        # 非阻塞 JPEG 编码锁
+result_lock = threading.Lock()
+
+# ---------- Pyjnius 原生回调（非阻塞 JPEG 编码）----------
+class AndroidPreviewCallback(PythonJavaClass):
+    __javainterfaces__ = ['android/hardware/Camera$PreviewCallback']
+    __javacontext__ = 'app'
+
+    def __init__(self):
+        super().__init__()
+        self.quality = 60  # 适当降低质量以加快压缩速度
+
+    @java_method('([BLandroid/hardware/Camera;)V')
+    def onPreviewFrame(self, data, camera):
+        global GLOBAL_JPEG_BYTES, GLOBAL_YUV_DATA
+        try:
+            w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+            # 先转换 Python bytes，供 YOLO 线程使用
+            b_data = bytes(data)
+            with yuv_lock:
+                GLOBAL_YUV_DATA = b_data
+
+            # 非阻塞 JPEG 压缩：如果上一帧还在处理中，直接丢弃本帧
+            if jpeg_lock.acquire(blocking=False):
+                try:
+                    yuv = YuvImage(data, ImageFormat.NV21, w, h, None)
+                    bos = ByteArrayOutputStream()
+                    yuv.compressToJpeg(Rect(0, 0, w, h), self.quality, bos)
+                    GLOBAL_JPEG_BYTES = bos.toByteArray()
+                finally:
+                    jpeg_lock.release()
+        except Exception as e:
+            print(f"[NativeCallbackError] {e}")
+
+NATIVE_CALLBACK = AndroidPreviewCallback()
+
+# ---------- KV UI 定义（包含 YOLO 开关）----------
 KV = r'''
 <RootWidget>:
-    orientation: 'vertical'
-    padding: dp(8)
-    spacing: dp(6)
     canvas.before:
         Color:
-            rgba: 0.08, 0.09, 0.11, 1
+            rgba: 0.1, 0.1, 0.1, 1
         Rectangle:
             pos: self.pos
             size: self.size
-    BoxLayout:
-        size_hint_y: None
-        height: dp(40)
-        spacing: dp(8)
-        Button:
-            text: 'Rescan'
-            on_release: app.manual_rescan()
-        Button:
-            text: 'Disconnect'
-            on_release: app.manual_disconnect()
-        Button:
-            text: 'Reconnect'
-            on_release: app.manual_reconnect()
-    BoxLayout:
-        size_hint_y: None
-        height: dp(40)
-        spacing: dp(8)
-        Label:
-            text: 'AdvertisData:'
-            size_hint_x: None
-            width: dp(100)
-            halign: 'left'
-            valign: 'middle'
-            color: 0.9,0.9,0.9,1
-        TextInput:
-            id: ad_input
-            text: app.advertis_data_input
-            multiline: False
-            font_size: '14sp'
-            background_color: 0.2,0.2,0.2,1
-            foreground_color: 1,1,1,1
-            on_text: app.advertis_data_input = self.text
-    Label:
-        text: 'Found devices:'
-        size_hint_y: None
-        height: dp(20)
-        color: 0.9,0.9,0.9,1
-    ScrollView:
-        size_hint_y: 0.20
-        BoxLayout:
-            id: device_container
-            orientation: 'vertical'
-            size_hint_y: None
-            height: self.minimum_height
-    Label:
-        text: app.device_text
-        text_size: self.width, None
-        halign: 'left'
-        valign: 'middle'
-        color: 0.9,0.9,0.9,1
-        size_hint_y: None
-        height: dp(45)
-    Label:
-        text: app.handshake_text
-        text_size: self.width, None
-        halign: 'left'
-        valign: 'middle'
-        color: 1,0.85,0.4,1
-        size_hint_y: None
-        height: dp(45)
-    BoxLayout:
-        size_hint_y: None
-        height: dp(48)
-        spacing: dp(8)
-        Button:
-            text: 'Power Toggle'
-            disabled: not app.control_ready
-            on_release: app.toggle_power()
+
+    Camera:
+        id: camera
+        resolution: (640, 480)
+        play: False
+        allow_stretch: True
+        keep_ratio: False
+        size_hint: None, None
+        size: (root.height, root.width) if (app.preview_angle % 180 != 0) else (root.width, root.height)
+        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+        canvas.before:
+            PushMatrix
+            Rotate:
+                angle: app.preview_angle
+                origin: self.center
+        canvas.after:
+            PopMatrix
+
+    Widget:
+        id: detect_overlay
+        size_hint: None, None
+        size: (root.height, root.width) if (app.preview_angle % 180 != 0) else (root.width, root.height)
+        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+
     BoxLayout:
         orientation: 'vertical'
-        size_hint_y: None
-        height: dp(170)
+        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+        size_hint: None, None
+        size: (dp(240), dp(100))
+        opacity: 1 if (camera.play and not camera.texture) else 0
+        padding: dp(15)
+        spacing: dp(10)
+        canvas.before:
+            Color:
+                rgba: 0.0, 0.0, 0.0, 0.75
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(12)]
+        Label:
+            text: "Connecting Hardware..."
+            font_size: '16sp'
+            bold: True
+            color: 1, 1, 1, 1
+        Label:
+            text: "Initializing video feed..."
+            font_size: '12sp'
+            color: 0.7, 0.7, 0.7, 1
+
+    BoxLayout:
+        orientation: 'vertical'
+        size_hint: 1, None
+        height: dp(290)
+        pos_hint: {'x': 0, 'y': 0}
+        padding: dp(12)
         spacing: dp(8)
+        canvas.before:
+            Color:
+                rgba: 0, 0, 0, 0.65
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
         Label:
-            text: 'Temp: {}°C'.format(app.target_temp)
-            color: 1,1,1,1
             size_hint_y: None
-            height: dp(28)
-        Slider:
-            min: 16
-            max: 30
-            step: 1
-            value: app.target_temp
-            disabled: not app.control_ready
-            on_value: app.on_temp_slider(self.value)
+            height: dp(18)
+            text: 'Professional Camera Controller'
+            font_size: '14sp'
+            color: 1, 1, 1, 0.85
+
         BoxLayout:
             size_hint_y: None
-            height: dp(44)
+            height: dp(38)
             spacing: dp(8)
+
             Button:
-                text: 'Cool'
-                disabled: not app.control_ready
-                on_release: app.set_mode('cool')
+                text: 'Start' if not camera.play else 'Stop'
+                background_normal: ''
+                background_color: (0.2, 0.6, 0.2, 0.6)
+                on_release: app.toggle_preview()
+
             Button:
-                text: 'Heat'
-                disabled: not app.control_ready
-                on_release: app.set_mode('heat')
+                text: 'Switch Cam'
+                background_normal: ''
+                background_color: (0.2, 0.4, 0.8, 0.6)
+                on_release: app.switch_camera()
+
             Button:
-                text: 'Fan'
-                disabled: not app.control_ready
-                on_release: app.set_mode('fan')
-            Button:
-                text: 'Dry'
-                disabled: not app.control_ready
-                on_release: app.set_mode('dry')
-            Button:
-                text: 'Auto'
-                disabled: not app.control_ready
-                on_release: app.set_mode('auto')
+                text: 'YOLO: ON' if app.yolo_enabled else 'YOLO: OFF'
+                background_normal: ''
+                background_color: (0.2, 0.8, 0.2, 0.6) if app.yolo_enabled else (0.5, 0.5, 0.5, 0.6)
+                on_release: app.toggle_yolo()
+
         BoxLayout:
-            size_hint_y: None
-            height: dp(44)
-            spacing: dp(8)
-            Button:
-                text: 'Auto Fan'
-                disabled: not app.control_ready
-                on_release: app.set_fan('auto')
-            Button:
-                text: 'Low'
-                disabled: not app.control_ready
-                on_release: app.set_fan('low')
-            Button:
-                text: 'Med'
-                disabled: not app.control_ready
-                on_release: app.set_fan('medium')
-            Button:
-                text: 'High'
-                disabled: not app.control_ready
-                on_release: app.set_fan('high')
-    Label:
-        text: app.control_text
-        text_size: self.width, None
-        halign: 'left'
-        valign: 'middle'
-        color: 0.85,1,0.85,1
-        size_hint_y: None
-        height: dp(50)
-    ScrollView:
-        do_scroll_x: False
-        Label:
-            text: app.log_text
-            text_size: self.width, None
-            size_hint_y: None
-            height: self.texture_size[1]
-            halign: 'left'
-            valign: 'top'
-            color: 0.85,0.85,0.85,1
+            orientation: 'horizontal'
+            spacing: dp(12)
+
+            BoxLayout:
+                orientation: 'vertical'
+                spacing: dp(6)
+
+                BoxLayout:
+                    orientation: 'horizontal'
+                    size_hint_y: None
+                    height: dp(32)
+                    Label:
+                        text: 'Brightness'
+                        size_hint_x: 0.35
+                        font_size: '12sp'
+                        halign: 'left'
+                    Slider:
+                        size_hint_x: 0.65
+                        min: -4
+                        max: 4
+                        value: app.brightness_value
+                        step: 1
+                        on_value: app.brightness_value = self.value
+
+                BoxLayout:
+                    orientation: 'horizontal'
+                    size_hint_y: None
+                    height: dp(32)
+                    Label:
+                        text: 'Chroma'
+                        size_hint_x: 0.35
+                        font_size: '12sp'
+                        halign: 'left'
+                    Slider:
+                        size_hint_x: 0.65
+                        min: 0
+                        max: 6
+                        value: app.chroma_value
+                        step: 1
+                        on_value: app.chroma_value = self.value
+
+                Label:
+                    id: status_label
+                    text: 'Initializing...'
+                    font_size: '12sp'
+                    color: 0.7, 0.9, 0.7, 0.8
+                    halign: 'center'
+                    valign: 'middle'
+
+                Label:
+                    id: fps_label
+                    text: 'FPS: --'
+                    font_size: '12sp'
+                    color: 1, 0.8, 0.3, 0.9
+                    halign: 'center'
+
+            FloatLayout:
+                size_hint: None, None
+                size: dp(140), dp(140)
+                pos_hint: {'center_y': 0.5}
+                canvas.before:
+                    Color:
+                        rgba: 0.35, 0.35, 0.35, 0.5
+                    Ellipse:
+                        pos: self.pos
+                        size: self.size
+                    Color:
+                        rgba: 0.05, 0.05, 0.05, 0.85
+                    Ellipse:
+                        pos: self.x + dp(22), self.y + dp(22)
+                        size: self.width - dp(44), self.height - dp(44)
+                
+                Button:
+                    text: 'UP' if app.preview_angle != 0 else 'UP *'
+                    size_hint: None, None
+                    size: dp(42), dp(42)
+                    pos_hint: {'center_x': 0.5, 'top': 1}
+                    background_normal: ''
+                    background_color: (0.85, 0.45, 0.1, 0.9) if app.preview_angle == 0 else (0.2, 0.2, 0.2, 0.6)
+                    on_release: app.set_preview_angle(0)
+                
+                Button:
+                    text: 'RIGHT' if app.preview_angle != 90 else 'RIGHT *'
+                    size_hint: None, None
+                    size: dp(42), dp(42)
+                    pos_hint: {'right': 1, 'center_y': 0.5}
+                    background_normal: ''
+                    background_color: (0.85, 0.45, 0.1, 0.9) if app.preview_angle == 90 else (0.2, 0.2, 0.2, 0.6)
+                    on_release: app.set_preview_angle(90)
+                
+                Button:
+                    text: 'DOWN' if app.preview_angle != 180 else 'DOWN *'
+                    size_hint: None, None
+                    size: dp(42), dp(42)
+                    pos_hint: {'center_x': 0.5, 'y': 0}
+                    background_normal: ''
+                    background_color: (0.85, 0.45, 0.1, 0.9) if app.preview_angle == 180 else (0.2, 0.2, 0.2, 0.6)
+                    on_release: app.set_preview_angle(180)
+                
+                Button:
+                    text: 'LEFT' if app.preview_angle != 270 else 'LEFT *'
+                    size_hint: None, None
+                    size: dp(42), dp(42)
+                    pos_hint: {'x': 0, 'center_y': 0.5}
+                    background_normal: ''
+                    background_color: (0.85, 0.45, 0.1, 0.9) if app.preview_angle == 270 else (0.2, 0.2, 0.2, 0.6)
+                    on_release: app.set_preview_angle(270)
 '''
 Builder.load_string(KV)
 
-class RootWidget(BoxLayout):
+class RootWidget(FloatLayout):
     pass
 
-class DeviceItem(BoxLayout):
-    def __init__(self, name, address, callback, **kwargs):
-        super().__init__(orientation='horizontal', size_hint_y=None, height=dp(36), **kwargs)
-        self.callback = callback
-        self.device_address = address
-        self.name_label = Label(text=name, size_hint_x=0.5, halign='left', valign='middle', color=(1,1,1,1))
-        self.addr_label = Label(text=address, size_hint_x=0.3, halign='center', valign='middle', color=(0.8,0.8,0.8,1))
-        self.connect_btn = Button(text='Connect', size_hint_x=0.2)
-        self.connect_btn.bind(on_press=lambda x: self.callback(self.device_address))
-        self.add_widget(self.name_label)
-        self.add_widget(self.addr_label)
-        self.add_widget(self.connect_btn)
-
-# ---------- Callbacks ----------
 class PermissionCallback(PythonJavaClass):
     __javainterfaces__ = ['org/kivy/android/PythonActivity$PermissionsCallback']
     __javacontext__ = 'app'
@@ -230,417 +320,356 @@ class PermissionCallback(PythonJavaClass):
     def onRequestPermissionsResult(self, requestCode, permissions, grantResults):
         Clock.schedule_once(lambda dt: self.owner._on_permissions_result(permissions, grantResults), 0)
 
-class PyScanListener(PythonJavaClass):
-    __javainterfaces__ = ['org/qgb/ble/ScanListener']
-    __javacontext__ = 'app'
-    def __init__(self, owner):
-        super().__init__()
-        self.owner = owner
-    @java_method('(Ljava/lang/String;Ljava/lang/String;I)V')
-    def onDeviceFound(self, address, name, rssi):
-        addr = str(address) if address else ''
-        dev_name = str(name) if name else ''
-        Clock.schedule_once(lambda dt: self.owner._on_scan_device_found(addr, dev_name, int(rssi)), 0)
-    @java_method('(I)V')
-    def onScanFailed(self, errorCode):
-        Clock.schedule_once(lambda dt: self.owner._on_scan_failed(int(errorCode)), 0)
-    @java_method('(Ljava/lang/String;)V')
-    def onScanError(self, message):
-        msg = str(message) if message else ''
-        Clock.schedule_once(lambda dt: self.owner._on_scan_error(msg), 0)            
-    @java_method('(Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)V')
-    def onDeviceFoundWithRecord(self, address, name, rssi, recordHex):
-        addr = str(address) if address else ''
-        dev_name = str(name) if name else ''
-        rec = str(recordHex) if recordHex else ''
-        Clock.schedule_once(lambda dt: self.owner._on_scan_device_found(addr, dev_name, int(rssi), rec), 0)
-
-class PyGattCallback(PythonJavaClass):
-    __javainterfaces__ = ['org/qgb/ble/GattListener']
-    __javacontext__ = 'app'
-    def __init__(self, owner, generation, device_name):
-        super().__init__()
-        self.owner = owner
-        self.generation = generation
-        self.device_name = device_name
-
-    def _valid(self):
-        return self.owner and self.generation == self.owner.connection_generation
-
-    @java_method('(II)V')
-    def onConnectionStateChange(self, status, newState):
-        Clock.schedule_once(lambda dt: self.owner._on_gatt_connection_state_change(
-            self.generation, int(status), int(newState)), 0)
-
-    @java_method('(I)V')
-    def onServicesDiscovered(self, status):
-        Clock.schedule_once(lambda dt: self.owner._on_gatt_services_discovered(
-            self.generation, int(status)), 0)
-
-    @java_method('(I)V')
-    def onCharacteristicWrite(self, status):
-        Clock.schedule_once(lambda dt: self.owner._on_gatt_characteristic_write(
-            self.generation, int(status)), 0)
-
-    @java_method('([B)V')
-    def onCharacteristicChanged(self, value):
-        print(f"onCharacteristicChanged {bytes(value).hex()}")#'jnius.ByteArray' object has no attribute 'hex'
-        if value:
-            unsigned = [b & 0xFF for b in value]
-            hex_data = bytes(unsigned).hex().upper()
+# ---------- HTTP Stream Server ----------
+class NativeMJPEGHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith('/mjpeg_stream'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Pragma', 'no-cache')
+            self.end_headers()
+            while True:
+                # 安全读取 JPEG 数据（无需锁，因为是原子引用替换）
+                jpeg_bytes = GLOBAL_JPEG_BYTES
+                if jpeg_bytes is None:
+                    time.sleep(0.05)
+                    continue
+                try:
+                    self.wfile.write(b'--frame\r\n')
+                    self.wfile.write(b'Content-Type: image/jpeg\r\n')
+                    self.wfile.write(f'Content-Length: {len(jpeg_bytes)}\r\n\r\n'.encode())
+                    self.wfile.write(jpeg_bytes)
+                    self.wfile.write(b'\r\n')
+                    time.sleep(0.03)
+                except Exception:
+                    break
+        elif self.path == '/' or self.path == '/index.html':
+            preview_html(self)
         else:
-            hex_data = ""
-        Clock.schedule_once(lambda dt: self.owner._on_gatt_characteristic_changed(
-            self.generation, hex_data), 0)
+            self.send_response(404)
+            self.end_headers()
 
-    # ---------- 新增：接收 onDescriptorWrite 回调 ----------
-    @java_method('(I)V')
-    def onDescriptorWrite(self, status):
-        Clock.schedule_once(lambda dt: self.owner._on_gatt_descriptor_write(
-            self.generation, int(status)), 0)
-    @java_method('(II)V')
-    def onMtuChanged(self, mtu, status):
-        Clock.schedule_once(lambda dt: self.owner._on_gatt_mtu_changed(self.generation, int(mtu), int(status)), 0)        
-            
-# ---------- Crypto helpers ----------
-def hexstr(data): return data.hex().upper()
-def from_hex(s):
-    s = (s or '').replace(' ', '').replace(':', '')
-    if len(s) % 2: raise ValueError('even hex length required')
-    return bytes.fromhex(s)
-def checksum_neg(data): return (1 + (~(sum(data) & 0xFF))) & 0xFF
-def hkdf_sha256(ikm, salt, info, length):
-    if salt is None: salt = b'\x00' * 32
-    prk = hmac_lib.new(salt, ikm, hashlib.sha256).digest()
-    t = b""; okm = b""
-    for i in range(1, (length+31)//32+1):
-        t = hmac_lib.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
-        okm += t
-    return okm[:length]
+    def set_header(self, key, value):
+        self.send_header(key, value)
+    def set_data(self, data):
+        self.end_headers()
+        self.wfile.write(data)
+    def set_status(self, code):
+        self.send_response(code)
+    def log_message(self, format, *args):
+        pass
 
-def generate_ec_keypair():
-    kg = KeyPairGenerator.getInstance("EC")
-    kg.initialize(ECGenParameterSpec("secp256r1"))
-    kp = kg.generateKeyPair()
-    priv = kp.getPrivate()
-    pub = kp.getPublic()
-    ec_pub = cast('java.security.interfaces.ECPublicKey', pub)
-    x_java = ec_pub.getW().getAffineX().toByteArray()
-    y_java = ec_pub.getW().getAffineY().toByteArray()
-    x_bytes = bytes([b & 0xFF for b in x_java])
-    y_bytes = bytes([b & 0xFF for b in y_java])
-    def pad32(b):
-        if len(b) > 32: b = b[-32:]
-        elif len(b) < 32: b = b'\x00'*(32-len(b))+b
-        return b
-    pub_bytes = b'\x04' + pad32(x_bytes) + pad32(y_bytes)
-    return priv, pub_bytes
+def run_stream_server():
+    try:
+        server = HTTPServer(('0.0.0.0', 1134), NativeMJPEGHandler)
+        server.serve_forever()
+    except Exception as e:
+        print(f"[StreamServer] Error: {e}")
 
-def ecdh_shared_secret(priv_key, peer_pub_64):
-    x_bytes = peer_pub_64[:32]; y_bytes = peer_pub_64[32:]
-    x = BigInteger(1, x_bytes); y = BigInteger(1, y_bytes)
-    tmp_kg = KeyPairGenerator.getInstance("EC")
-    tmp_kg.initialize(ECGenParameterSpec("secp256r1"))
-    tmp_kp = tmp_kg.generateKeyPair()
-    params = tmp_kp.getPublic().getParams()
-    pub_spec = ECPublicKeySpec(ECPoint(x, y), params)
-    kf = KeyFactory.getInstance("EC")
-    peer_pub = kf.generatePublic(pub_spec)
-    ka = KeyAgreement.getInstance("ECDH")
-    ka.init(priv_key)
-    ka.doPhase(peer_pub, True)
-    shared = ka.generateSecret()
-    return bytes(shared)
+# 全局添加配置变量（放在文件开头全局变量区）
+MODEL_INPUT_WIDTH = 320
+MODEL_INPUT_HEIGHT = 320
 
-# ---------- 修复后的 AES-CCM（nonce=8, tag=8, L=7）----------
-def aes_ccm_encrypt(key, nonce, plaintext, aad=b''):
-    tag_len = 8
-    L = 7
-    flags = ((1 if aad else 0) << 6) | (((tag_len - 2) // 2) << 3) | (L - 1)
-    b0 = bytes([flags]) + nonce + len(plaintext).to_bytes(L, 'big')
+# 修改 detection_worker 函数内部
+def detection_worker():
+    global DETECTION_RESULTS, FPS, GLOBAL_YUV_DATA, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+    import numpy
+    from PIL import Image
 
-    # 关键修复：认证数据必须包含明文
-    if aad:
-        if len(aad) < 0xFF00:
-            aad_len = struct.pack('>H', len(aad))
-        else:
-            aad_len = b'\xff\xfe' + struct.pack('>I', len(aad))
-        auth_data = b0 + aad_len + aad + plaintext
-    else:
-        auth_data = b0 + plaintext
+    try:
+        import tflite_runtime.interpreter as tflite
+    except ImportError:
+        try:
+            import tensorflow.lite as tflite
+        except ImportError:
+            print("[Detection] Error: no tflite")
+            tflite = None
 
-    aes = pyaes.AESModeOfOperationECB(key)
-    mac = bytearray(16)
-    for i in range(0, len(auth_data), 16):
-        block = auth_data[i:i+16]
-        if len(block) < 16:
-            block += b'\x00' * (16 - len(block))
-        mac = aes.encrypt(bytes(xor_bytes(mac, block)))
+    interpreter = None
+    input_details = None
+    output_details = None
+    input_shape = (MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT)  # 320x320 提速
+    is_nchw = False
+    model_path = "yolov8n_float32.tflite"
 
-    # 生成密钥流并加密（计数器从 1 开始）
-    ctr_flags = L - 1
-    ctr_base = bytes([ctr_flags]) + nonce
-    keystream = b''
-    for j in range(1, (len(plaintext) + 15) // 16 + 1):
-        ctr_block = ctr_base + j.to_bytes(L, 'big')
-        keystream += aes.encrypt(ctr_block)
-    ciphertext = bytes(p ^ k for p, k in zip(plaintext, keystream))
+    if tflite and os.path.exists(model_path):
+        try:
+            interpreter = tflite.Interpreter(model_path=model_path)#, num_threads=4 崩溃
+            interpreter.allocate_tensors()
+            input_details = interpreter.get_input_details()
+            output_details = interpreter.get_output_details()
+            in_shape = input_details[0]['shape']
+            if len(in_shape) == 4:
+                if in_shape[1] == 3:
+                    is_nchw = True
+                    input_shape = (in_shape[3], in_shape[2])
+                else:
+                    is_nchw = False
+                    input_shape = (in_shape[2], in_shape[1])
+            print(f"[Detection] Loaded. Input {input_shape}, NCHW: {is_nchw}")
+        except Exception as e:
+            print(f"[Detection] Model load error: {e}")
+            interpreter = None
 
-    # 计算 tag
-    ctr0 = ctr_base + (0).to_bytes(L, 'big')
-    enc_tag = aes.encrypt(ctr0)
-    tag = xor_bytes(mac[:tag_len], enc_tag[:tag_len])
-    return ciphertext + tag
+    def nv21_to_rgb(data, w, h):
+        y_size = w * h
+        y = numpy.frombuffer(data[:y_size], dtype=numpy.uint8).reshape((h, w)).astype(numpy.float32)
+        vu = numpy.frombuffer(data[y_size:], dtype=numpy.uint8).reshape((h//2, w//2, 2)).astype(numpy.float32)
+        v = numpy.repeat(numpy.repeat(vu[:,:,0] - 128.0, 2, axis=0), 2, axis=1)
+        u = numpy.repeat(numpy.repeat(vu[:,:,1] - 128.0, 2, axis=0), 2, axis=1)
+        r = numpy.clip(y + 1.402 * v, 0, 255)
+        g = numpy.clip(y - 0.344136 * u - 0.714136 * v, 0, 255)
+        b = numpy.clip(y + 1.772 * u, 0, 255)
+        return numpy.stack([r, g, b], axis=-1).astype(numpy.uint8)
 
-def aes_ccm_decrypt(key, nonce, ciphertext_tag, aad=b''):
-    tag_len = 8
-    ciphertext = ciphertext_tag[:-tag_len]
-    tag = ciphertext_tag[-tag_len:]
+    def pure_nms(boxes, scores, iou_thresh=0.45):
+        if len(boxes) == 0: return []
+        x1, y1, x2, y2 = boxes[:,0], boxes[:,1], boxes[:,2], boxes[:,3]
+        areas = (x2 - x1) * (y2 - y1)
+        order = scores.argsort()[::-1]
+        keep = []
+        while order.size > 0:
+            i = order[0]
+            keep.append(i)
+            xx1 = numpy.maximum(x1[i], x1[order[1:]])
+            yy1 = numpy.maximum(y1[i], y1[order[1:]])
+            xx2 = numpy.minimum(x2[i], x2[order[1:]])
+            yy2 = numpy.minimum(y2[i], y2[order[1:]])
+            w_inter = numpy.maximum(0, xx2-xx1)
+            h_inter = numpy.maximum(0, yy2-yy1)
+            inter = w_inter * h_inter
+            ovr = inter / (areas[i] + areas[order[1:]] - inter)
+            inds = numpy.where(ovr <= iou_thresh)[0]
+            order = order[inds+1]
+        return keep
 
-    L = 7
-    ctr_flags = L - 1
-    ctr_base = bytes([ctr_flags]) + nonce
+    prev_time = time.time()
+    frame_count = 0
+    _last_debug = 0
 
-    # 先解密得到明文
-    aes = pyaes.AESModeOfOperationECB(key)
-    keystream = b''
-    for j in range(1, (len(ciphertext) + 15) // 16 + 1):
-        ctr_block = ctr_base + j.to_bytes(L, 'big')
-        keystream += aes.encrypt(ctr_block)
-    plaintext = bytes(c ^ k for c, k in zip(ciphertext, keystream))
+    while True:
+        try:
+            app = App.get_running_app()
+            if app and not app.yolo_enabled:
+                with result_lock: DETECTION_RESULTS = []
+                FPS = 0
+                time.sleep(0.1)
+                continue
+        except: pass
 
-    # 重新计算标签
-    flags = ((1 if aad else 0) << 6) | (((tag_len - 2) // 2) << 3) | (L - 1)
-    b0 = bytes([flags]) + nonce + len(plaintext).to_bytes(L, 'big')
-    if aad:
-        if len(aad) < 0xFF00:
-            aad_len = struct.pack('>H', len(aad))
-        else:
-            aad_len = b'\xff\xfe' + struct.pack('>I', len(aad))
-        auth_data = b0 + aad_len + aad + plaintext
-    else:
-        auth_data = b0 + plaintext
+        with yuv_lock:
+            data = GLOBAL_YUV_DATA
+        if data is None:
+            time.sleep(0.005)
+            continue
 
-    mac = bytearray(16)
-    for i in range(0, len(auth_data), 16):
-        block = auth_data[i:i+16]
-        if len(block) < 16:
-            block += b'\x00' * (16 - len(block))
-        mac = aes.encrypt(bytes(xor_bytes(mac, block)))
+        w_cam, h_cam = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        try:
+            rgb = nv21_to_rgb(data, w_cam, h_cam)
+            pil_img = Image.fromarray(rgb)
 
-    ctr0 = ctr_base + (0).to_bytes(L, 'big')
-    enc_tag = aes.encrypt(ctr0)
-    expected_tag = xor_bytes(mac[:tag_len], enc_tag[:tag_len])
-    if tag != expected_tag:
-        raise ValueError("CCM tag mismatch")
-    return plaintext
+            boxes = []
+            t_infer = 0
+            if interpreter:
+                resized = pil_img.resize(input_shape)
+                input_data = numpy.array(resized, dtype=numpy.float32) / 255.0
+                if is_nchw:
+                    input_data = numpy.transpose(input_data, (2,0,1))
+                input_data = numpy.expand_dims(input_data, 0)
 
-def xor_bytes(a,b): return bytes(x^y for x,y in zip(a,b))
+                interpreter.set_tensor(input_details[0]['index'], input_data)
+                t0 = time.perf_counter()
+                interpreter.invoke()
+                t_infer = time.perf_counter() - t0
+                outputs = interpreter.get_tensor(output_details[0]['index'])
 
-def crc8_854(data):
-    crc=0
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            if crc & 1: crc = (crc>>1)^0x8C
-            else: crc >>= 1
-    return crc
+                output = outputs[0]
+                if output.shape[0] < output.shape[1]:
+                    output = output.T
 
-# ---------- Appliance status parser ----------
-def parse_status_frame(data):
-    if len(data) < 25 or data[0] != 0xAA or data[10] != 0xC0:
-        return None
-    state = {}
-    run_status = data[11]
-    state['power'] = bool(run_status & 0x01)
-    state['fault'] = bool(run_status & 0x80)
-    mode_map = {1: 'auto', 2: 'cool', 3: 'dry', 4: 'heat', 5: 'fan', 6: 'smart_dry'}
-    mode_val = (data[12] >> 5) & 0x07
-    state['mode'] = mode_map.get(mode_val, 'unknown')
-    temp_int = (data[12] & 0x0F) + 16
-    temp_half = (data[12] >> 4) & 0x01
-    state['set_temp'] = temp_int + 0.5 * temp_half
-    fan_map = {1: 'low', 2: 'medium', 3: 'high', 4: 'strong', 5: 'mute', 6: 'auto', 7: 'fixed'}
-    fan_val = data[13] & 0x7F
-    state['fan'] = fan_map.get(fan_val, 'unknown')
-    indoor_temp = (data[21] - 50) / 2.0
-    indoor_temp_frac = (data[25] >> 4) & 0x0F
-    state['indoor_temp'] = indoor_temp + indoor_temp_frac * 0.1
-    outdoor_temp = (data[22] - 50) / 2.0
-    outdoor_temp_frac = data[25] & 0x0F
-    state['outdoor_temp'] = outdoor_temp + outdoor_temp_frac * 0.1
-    return state
+                boxes_raw = output[:, :4]   # cx,cy,w,h (0~1)
+                scores = output[:, 4:]
+                cls_ids = numpy.argmax(scores, axis=1)
+                confs = numpy.max(scores, axis=1)
 
-# ---------- Protocol ----------
-class MideaProtocol:
-    CONN_T1=0x01; CONN_T2=0x02; CONN_T3=0x03
-    SEC_C1=0x01; SEC_C2=0x02; SEC_C3=0x03; SEC_C4=0x04
-    BIZ_TYPE_AC=32
-    def __init__(self):
-        self.root_key=None; self.session_key=None; self.ec_priv=None; self.ec_pub_64=None
-        self.conn_seq=random.randint(1,255); self.sec_seq=0; self.appliance_order=1
-    def derive_root_key(self, ad_hex):
-        self.root_key=hkdf_sha256(from_hex(ad_hex),None,b'midea_bleapp',16)
-        return self.root_key
-    def create_ec_keypair(self):
-        priv,pub_full=generate_ec_keypair()
-        self.ec_priv=priv; self.ec_pub_64=pub_full[1:]
-        return self.ec_pub_64
-    def derive_session_key(self, peer_pub_64):
-        shared=ecdh_shared_secret(self.ec_priv, peer_pub_64)
-        self.session_key=hashlib.sha256(shared).digest()[:16]
-        return self.session_key
-    def build_conn_frame(self, conn_type, payload):
-        seq = self.conn_seq
-        self.conn_seq = (self.conn_seq + 1) & 0xFF
-        body_len = len(payload) + 4   #协议规定 LEN = len(payload) + 4
-        frame = bytearray(2 + 1 + 1 + 1 + len(payload) + 1)
-        frame[0] = 0xAA
-        frame[1] = 0x55
-        frame[2] = body_len & 0xFF
-        frame[3] = seq
-        frame[4] = conn_type
-        frame[5:5+len(payload)] = payload
-        frame[-1] = checksum_neg(frame[2:-1])
-        return bytes(frame)
+                mask = confs > 0.25
+                f_boxes = boxes_raw[mask]
+                f_confs = confs[mask]
+                f_cls = cls_ids[mask]
+
+                if len(f_boxes):
+                    # 关键修复：直接反归一化到相机像素坐标
+                    cx = f_boxes[:,0] * w_cam
+                    cy = f_boxes[:,1] * h_cam
+                    bw = f_boxes[:,2] * w_cam
+                    bh = f_boxes[:,3] * h_cam
+
+                    x1 = cx - bw/2.0
+                    y1 = cy - bh/2.0
+                    x2 = cx + bw/2.0
+                    y2 = cy + bh/2.0
+
+                    box_coords = numpy.stack([x1, y1, x2, y2], axis=1)
+                    keep = pure_nms(box_coords, f_confs, 0.45)
+                    for idx in keep:
+                        boxes.append((
+                            float(x1[idx]), float(y1[idx]),
+                            float(x2[idx]), float(y2[idx]),
+                            float(f_confs[idx]), int(f_cls[idx])
+                        ))
+
+            with result_lock:
+                DETECTION_RESULTS = boxes
+
+            now = time.time()
+            if now - _last_debug >= 1.0:
+                _last_debug = now
+                print(f"[Detection] FPS:{frame_count} Boxes:{len(boxes)} Infer:{t_infer*1000:.0f}ms")
+                if boxes: print(f"  Sample {boxes[0]}")
+
+            frame_count += 1
+            if now - prev_time >= 1.0:
+                FPS = frame_count
+                frame_count = 0
+                prev_time = now
+
+        except Exception as e:
+            print(f"[Detection] Error: {e}")
+            traceback.print_exc()
+            time.sleep(0.1)
+
+        time.sleep(0.005)
         
-    def build_security_frame(self, cmd, body):
-        self.sec_seq=(self.sec_seq+1)&0xFF; length=len(body)
-        return bytes([cmd, self.sec_seq, length])+body
-    def encrypt_security_payload(self, key, sec_bytes):
-        nonce=os.urandom(8)
-        ct=aes_ccm_encrypt(key, nonce, sec_bytes)
-        return nonce+ct
-    def decrypt_security_payload(self, key, blob):
-        nonce=blob[:8]; ct_tag=blob[8:]
-        return aes_ccm_decrypt(key, nonce, ct_tag)
-    def build_c1_frame(self):
-        openid=os.urandom(6)
-        sec=self.build_security_frame(self.SEC_C1, openid)
-        encrypted=self.encrypt_security_payload(self.root_key, sec)
-        return self.build_conn_frame(self.CONN_T2, encrypted)
-    def build_c2_frame(self):
-        sec=self.build_security_frame(self.SEC_C2, b'')
-        encrypted=self.encrypt_security_payload(self.root_key, sec)
-        return self.build_conn_frame(self.CONN_T2, encrypted)
-    def build_c3_frame(self, my_pub_64, ad_hex):
-        ad=from_hex(ad_hex)
-        encrypted_ad=aes_ccm_encrypt(self.session_key, os.urandom(8), ad)
-        body=my_pub_64+encrypted_ad
-        sec=self.build_security_frame(self.SEC_C3, body)
-        encrypted=self.encrypt_security_payload(self.root_key, sec)
-        return self.build_conn_frame(self.CONN_T2, encrypted)
-    def build_biz_frame(self, biz_type, body):
-        length=len(body)+4
-        biz=bytearray(2+1+len(body)+1)
-        biz[0]=biz_type; biz[1]=length&0xFF; biz[2]=0x00
-        biz[3:3+len(body)]=body; biz[-1]=checksum_neg(biz[:len(body)+3])
-        encrypted=aes_ccm_encrypt(self.session_key, os.urandom(8), bytes(biz))
-        return self.build_conn_frame(self.CONN_T3, encrypted)
-    def build_query_frame(self):
-        order=self.appliance_order; self.appliance_order=(order%255)+1
-        frame=bytearray(25)
-        frame[0]=0xAA; frame[1]=23; frame[2]=0xAC; frame[8]=0x00; frame[9]=0x03; frame[10]=0x41
-        frame[11]=0x21; frame[12]=0x00; frame[13]=0xFF; frame[14]=0x03; frame[15]=0xFF
-        frame[16]=0x00; frame[17]=0x02; frame[18:22]=b'\x00\x00\x00\x00'; frame[22]=order
-        crc=crc8_854(frame[10:23]); frame[23]=crc
-        cs=checksum_neg(frame[1:24]); frame[24]=cs
-        return bytes(frame)
-    def build_control_frame(self, state):
-        order=self.appliance_order; self.appliance_order=(order%255)+1
-        frame=bytearray(37)
-        frame[0]=0xAA; frame[1]=36; frame[2]=0xAC; frame[8]=0x02; frame[9]=0x02; frame[10]=0x40
-        power=state.get('power', False); mode=state.get('mode','cool')
-        temp=state.get('temp',25); fan=state.get('fan','auto')
-        mode_map={'auto':1,'cool':2,'dry':3,'heat':4,'fan':5}; mode_byte=mode_map.get(mode,2)
-        temp_int=max(16, min(30, int(temp)))
-        fan_map={'low':1,'medium':2,'high':3,'auto':6,'mute':5,'strong':4}; fan_byte=fan_map.get(fan,6)
-        frame[11]=(1 if power else 0)|0x02
-        frame[12]=(mode_byte<<5)|(temp_int-16)&0x0F
-        frame[13]=fan_byte; frame[17]=0x30
-        crc=crc8_854(frame[10:35]); frame[35]=crc
-        cs=checksum_neg(frame[1:36]); frame[36]=cs
-        return bytes(frame)
-    def parse_conn_frame(self, data):
-        if len(data)<4: return None
-        if data[0]!=0xAA or data[1]!=0x55: return None
-        body_len=data[2]; frame_len=2+1+body_len
-        if len(data)<frame_len: return None
-        frame=data[:frame_len]
-        if checksum_neg(frame[2:-1])!=frame[-1]: return None
-        conn_type=frame[4]; payload=frame[5:-1]
-        return conn_type, payload, frame_len
-
-# ---------- Main App ----------
+        
 class HualingACApp(App):
-    title_text = StringProperty('Midea AC BLE Control')
+    title_text = StringProperty('Camera Preview')
     status_text = StringProperty('')
-    device_text = StringProperty('')
-    handshake_text = StringProperty('')
-    control_text = StringProperty('Status: Power=False Temp=25 Mode=cool Fan=auto')
     log_text = StringProperty('')
-    gatt_ready = BooleanProperty(False)
-    control_ready = BooleanProperty(False)
-    target_temp = NumericProperty(25)
-    # advertis_data_input=StringProperty('AC32323034303535370D368D302724')  # 备用
-    # advertis_data_input = StringProperty('AC32323034303035372427308D360D')  # 正序
-    advertis_data_input = StringProperty('AC32323034303035370D368D302724')  # 逆序
-
-    MIDEA_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
-    MIDEA_WRITE_UUID = "0000ffa1-0000-1000-8000-00805f9b34fb"
-    MIDEA_NOTIFY_UUID = "0000ffa2-0000-1000-8000-00805f9b34fb"
-    CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+    flash_mode_text = StringProperty('Flash: Off')
+    
+    preview_angle = NumericProperty(270)
+    brightness_value = NumericProperty(0)
+    chroma_value = NumericProperty(3)
+    yolo_enabled = BooleanProperty(True)
 
     def build(self):
         self.root_widget = RootWidget()
         self.activity = PythonActivity.mActivity
         self.context = self.activity.getApplicationContext()
-        self.protocol = MideaProtocol()
         self.permission_callback = PermissionCallback(self)
-        self.scan_listener = None
-        self.scan_session = None
-        self.gatt_callback = None
-        self.gatt = None
-        self.write_char = None
+
         self.is_paused = False
         self.permissions_ok = False
-        self.is_scanning = False
-        self.is_connecting = False
-        self.is_connected = False
-        self.notification_ready = False
-        self.handshake_done = False
-        self.handshake_started = False
-        self.cccd_retry_count = 0
-        self.mtu_negotiated = False          # MTU 协商状态
-        self.mtu_failed = False
-        self.connection_generation = 0
-        self.current_device_addr = ''
-        self.current_device_name = ''
-        self.current_advertis_data = ''
-        self.seen_devices = {}
-        self.write_queue = deque()
-        self.write_in_progress = False
-        self.last_write_tag = ''
-        self.auto_reconnect_event = None
-        self.scan_timeout_event = None
-        self.handshake_timeout_event = None
-        self.c1_timer = None
-        self.step_timer = None
-        self.c2_frame = None
-        self.c3_frame = None
-        self.step_count = 0
-        self.c1_count = 0
-        self.hs_state = 'idle'
-        self.desired_state = {'power': False, 'mode': 'cool', 'temp': 25, 'fan': 'auto'}
-        self.rx_buffer = b''
-        self._log('[App] Starting...')
+        self.flash_mode = 0  
+        self._pending_start = False  
+
+        self._log('App starting...')
         Clock.schedule_once(lambda dt: self.startup(), 0.2)
-        self._service_discovery_timeout = None
+        
+        # 启动 HTTP 流服务器
+        threading.Thread(target=run_stream_server, daemon=True).start()
+        # 启动检测线程
+        threading.Thread(target=detection_worker, daemon=True).start()
+        # 定时更新检测框和 FPS
+        Clock.schedule_interval(self.update_detection_display, 1.0/15.0)
+        
         return self.root_widget
 
-    # ---------- 日志和界面更新 ----------
+    def toggle_yolo(self):
+        self.yolo_enabled = not self.yolo_enabled
+        print(f"[UI] YOLO enabled: {self.yolo_enabled}")
+
+    def update_detection_display(self, dt):
+        if hasattr(self.root_widget.ids, 'fps_label'):
+            self.root_widget.ids.fps_label.text = f'FPS: {FPS}'
+        
+        overlay = self.root_widget.ids.detect_overlay
+        # 首次打印 overlay 尺寸，方便调试
+        if not hasattr(self, '_debug_overlay_printed'):
+            print(f"[Overlay] Size: {overlay.width}x{overlay.height}, Angle: {self.preview_angle}")
+            self._debug_overlay_printed = True
+
+        overlay.canvas.clear()
+
+        with result_lock:
+            results = list(DETECTION_RESULTS)
+
+        w_cam, h_cam = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        w_scr, h_scr = overlay.width, overlay.height
+        
+        if w_scr <= 0 or h_scr <= 0 or not results:
+            return
+
+        angle = self.preview_angle
+        with overlay.canvas:
+            Color(0, 1, 0, 0.8)
+            for (x1, y1, x2, y2, conf, cls) in results:
+                nx1, ny1 = x1 / w_cam, y1 / h_cam
+                nx2, ny2 = x2 / w_cam, y2 / h_cam
+
+                if angle == 270:
+                    sx1, sy1 = ny1 * w_scr, (1 - nx2) * h_scr
+                    sx2, sy2 = ny2 * w_scr, (1 - nx1) * h_scr
+                elif angle == 90:
+                    sx1, sy1 = (1 - ny2) * w_scr, nx1 * h_scr
+                    sx2, sy2 = (1 - ny1) * w_scr, nx2 * h_scr
+                elif angle == 180:
+                    sx1, sy1 = (1 - nx2) * w_scr, ny1 * h_scr
+                    sx2, sy2 = (1 - nx1) * w_scr, ny2 * h_scr
+                else:  # 0度
+                    sx1, sy1 = nx1 * w_scr, (1 - ny2) * h_scr
+                    sx2, sy2 = nx2 * w_scr, (1 - ny1) * h_scr
+
+                box_w = abs(sx2 - sx1)
+                box_h = abs(sy2 - sy1)
+                left = min(sx1, sx2)
+                bottom = min(sy1, sy2)
+
+                Line(rectangle=(left, bottom, box_w, box_h), width=2.0)
+
+    def on_brightness_value(self, instance, value):
+        self._apply_professional_settings()
+
+    def on_chroma_value(self, instance, value):
+        self._apply_professional_settings()
+
+    def set_preview_angle(self, angle):
+        self.preview_angle = angle
+        overlay = self.root_widget.ids.detect_overlay
+        if angle % 180 != 0:
+            overlay.size = (self.root_widget.height, self.root_widget.width)
+        else:
+            overlay.size = (self.root_widget.width, self.root_widget.height)
+        self._set_status(f'Preview orientation locked to {angle} deg')
+
+    def get_supported_resolutions(self):
+        try:
+            cam = self.root_widget.ids.camera
+            if cam._camera and hasattr(cam._camera, '_android_camera') and cam._camera._android_camera is not None:
+                sizes = cam._camera._android_camera.getParameters().getSupportedPreviewSizes()
+                res = [(s.width, s.height) for s in sizes]
+                return str(res)
+        except Exception as e:
+            self._log(f'Failed to get resolutions: {e}')
+        return '[(640, 480)]'
+
+    def set_preview_resolution(self, w, h):
+        global GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        if w == GLOBAL_CAM_WIDTH and h == GLOBAL_CAM_HEIGHT:
+            return
+        GLOBAL_CAM_WIDTH = w
+        GLOBAL_CAM_HEIGHT = h
+        self._set_status(f'Resolution set to {w}x{h}, restarting preview...')
+        camera = self.root_widget.ids.camera
+        if camera.play:
+            camera.play = False
+            Clock.schedule_once(lambda dt: self._start_camera_preview(), 0.6)
+        else:
+            self._start_camera_preview()
+
     def _log(self, msg):
-        print(f'[BLE-DEBUG] {msg}')
+        print(f'[CameraApp] {msg}')
         lines = self.log_text.split('\n') if self.log_text else []
         lines.append(msg)
         if len(lines) > 120:
@@ -650,123 +679,38 @@ class HualingACApp(App):
     def _set_status(self, msg):
         self.status_text = msg
         self._log(msg)
-
-    def _refresh_control_text(self):
-        self.control_text = (f'Status: Power={self.desired_state["power"]} '
-                             f'Temp={self.desired_state["temp"]} '
-                             f'Mode={self.desired_state["mode"]} '
-                             f'Fan={self.desired_state["fan"]}')
-
-    # ---------- Lifecycle ----------
-    def on_start(self):
-        self._refresh_control_text()
+        if hasattr(self.root_widget.ids, 'status_label'):
+            self.root_widget.ids.status_label.text = msg
 
     def on_pause(self):
         self.is_paused = True
-        self.stop_scan()
+        camera = self.root_widget.ids.camera
+        if camera.play:
+            camera.play = False
         return True
 
     def on_resume(self):
         self.is_paused = False
-        Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), 0.8)
 
     def on_stop(self):
-        self.cleanup_all()
+        camera = self.root_widget.ids.camera
+        if camera.play:
+            camera.play = False
 
-    def cleanup_all(self):
-        self.cancel_timers()
-        self.stop_scan()
-        self.disconnect_gatt(False)
-
-    def cancel_timers(self):
-        for ev in ('auto_reconnect_event', 'scan_timeout_event', 'handshake_timeout_event',
-                   'c1_timer', 'step_timer'):
-            e = getattr(self, ev, None)
-            if e:
-                try:
-                    e.cancel()
-                except:
-                    pass
-            setattr(self, ev, None)
-
-    # ---------- Permissions ----------
     def startup(self):
-        self.request_permissions()
+        self.request_camera_permission()
 
     def _required_permissions(self):
-        """
-        返回应用需要【动态弹窗申请】的 Android 危险权限列表。
-        已自动剔除 INTERNET、WAKE_LOCK 等安装时自动授予的普通权限，避免请求被系统拒绝。
-        """
-        try:
-            from android import ANDROID_VERSION
-            sdk = ANDROID_VERSION
-        except ImportError:
-            from jnius import autoclass
-            VERSION = autoclass('android.os.Build$VERSION')
-            sdk = VERSION.SDK_INT
+        return ["android.permission.CAMERA"]
 
-        # 存储真正需要动态弹窗的“危险权限”
-        dynamic_perms = []
-
-        # ==========================================
-        # 1. 基础危险权限（不分版本，都需要动态申请）
-        # ==========================================
-        dynamic_perms.append("android.permission.CAMERA")
-        dynamic_perms.append("android.permission.RECORD_AUDIO")
-        dynamic_perms.append("android.permission.READ_PHONE_STATE")
-
-        # ==========================================
-        # 2. 存储权限适配
-        # ==========================================
-        if sdk >= 33:  # Android 13+
-            dynamic_perms.extend([
-                "android.permission.READ_MEDIA_IMAGES",
-                "android.permission.READ_MEDIA_VIDEO",
-                "android.permission.READ_MEDIA_AUDIO",
-                "android.permission.POST_NOTIFICATIONS"  # 通知权限在 API 33 成为危险权限
-            ])
-        else:  # Android 12 及以下
-            dynamic_perms.extend([
-                "android.permission.READ_EXTERNAL_STORAGE",
-                "android.permission.WRITE_EXTERNAL_STORAGE"
-            ])
-
-        # ==========================================
-        # 3. 蓝牙与定位权限适配（影响蓝牙连接的核心）
-        # ==========================================
-        if sdk >= 31:  # Android 12+
-            # Android 12 引入了独立的蓝牙运行时权限
-            dynamic_perms.extend([
-                "android.permission.BLUETOOTH_SCAN",
-                "android.permission.BLUETOOTH_CONNECT"
-            ])
-            # 注意：如果你的蓝牙连接需要获取地理位置，或者为了兼容某些低功耗蓝牙(BLE)设备，Android 12+ 依然建议加上前台定位
-            dynamic_perms.append("android.permission.ACCESS_FINE_LOCATION")
-        else:  # Android 11 及以下
-            # 老版本中，蓝牙扫描强依赖定位权限
-            dynamic_perms.extend([
-                "android.permission.ACCESS_FINE_LOCATION",
-                "android.permission.ACCESS_COARSE_LOCATION"
-            ])
-            # 此时的 BLUETOOTH 和 BLUETOOTH_ADMIN 是普通权限，不需要加到动态列表里！
-
-        # ==========================================
-        # 避坑指南：关于 ACCESS_BACKGROUND_LOCATION（后台定位）
-        # ==========================================
-        # 如果你的应用确实需要在后台默默定位/扫描蓝牙，请不要放在这里！
-        # 你必须在用户同意了上面的“前台定位”后，再单独写一个逻辑去申请后台定位。
-        # 如果不需要后台定位，直接在 buildozer.spec 和这里都删掉它。
-
-        return dynamic_perms                    
-    def request_permissions(self):
+    def request_camera_permission(self):
         perms = self._required_permissions()
         missing = [p for p in perms if self.activity.checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED]
         if not missing:
             self.permissions_ok = True
-            Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), 0.2)
+            Clock.schedule_once(lambda dt: self._on_permission_granted(), 0.2)
             return
-        self._set_status('[PERM] Requesting permissions...')
+        self._set_status('Requesting CAMERA permission...')
         self.activity.addPermissionsCallback(self.permission_callback)
         self.activity.requestPermissions(missing, 1001)
 
@@ -781,677 +725,328 @@ class HualingACApp(App):
                     break
         self.permissions_ok = ok
         if ok:
-            self._set_status('[PERM] Permissions granted')
-            Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), 0.2)
+            self._set_status('Camera permission granted')
+            Clock.schedule_once(lambda dt: self._on_permission_granted(), 0.2)
         else:
-            self._set_status('[PERM] Permission denied')
+            self._set_status('Camera permission denied')
 
-    # ---------- Scan/Connect ----------
-    def ensure_scan_or_connect(self):
-        if self.is_paused or not self.permissions_ok:
+    def _on_permission_granted(self):
+        self._start_camera_preview()
+
+    def _start_camera_preview(self):
+        camera = self.root_widget.ids.camera
+        if camera.play or self._pending_start:
             return
-        if self.is_connected or self.is_connecting:
-            return
-        if self.current_device_addr:
-            self.connect_to_device(self.current_device_addr, self.current_device_name,
-                                   self.current_advertis_data)
-        else:
-            self.start_scan()
-
-    def manual_rescan(self):
-        self._log('[UI] Rescan pressed')
-        self.stop_scan()
-        self.disconnect_gatt(True)
-        self.seen_devices.clear()
-        self.current_device_addr = ''
-        container = self.root_widget.ids.device_container
-        container.clear_widgets()
-        Clock.schedule_once(lambda dt: self.start_scan(), 0.2)
-
-    def manual_disconnect(self):
-        self._log('[UI] Disconnect pressed')
-        self.disconnect_gatt(False)
-
-    def manual_reconnect(self):
-        self._log('[UI] Reconnect pressed')
-        self.disconnect_gatt(False)
-        Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), 0.8)
-
-    def start_scan(self):
-        self._log('[SCAN] start_scan()')
-        if self.is_paused or not self.permissions_ok:
-            return
-        if self.is_scanning:
-            return
-        self.stop_scan()
-        self.seen_devices.clear()
-        container = self.root_widget.ids.device_container
-        container.clear_widgets()
-        self.scan_listener = PyScanListener(self)
-        self.scan_session = BleBridge.startScan(self.context, self.scan_listener)
-        if self.scan_session is not None:
-            self.is_scanning = True
-            self.scan_timeout_event = Clock.schedule_once(lambda dt: self._on_scan_timeout(), 12)
-            self._log('[SCAN] Started')
-        else:
-            self._log('[SCAN] Failed')
-            self.schedule_reconnect()
-
-    def stop_scan(self):
-        self.is_scanning = False
-        if self.scan_timeout_event:
-            try:
-                self.scan_timeout_event.cancel()
-            except:
-                pass
-            self.scan_timeout_event = None
-        if self.scan_session:
-            try:
-                self.scan_session.stop()
-            except:
-                pass
-            self.scan_session = None
-        self.scan_listener = None
-
-    def _on_scan_timeout(self):
-        self.scan_timeout_event = None
-        if self.is_connected or self.is_connecting:
-            return
-        self._log('[SCAN] Timeout')
-        self.stop_scan()
-        self.schedule_reconnect()
-
-    def _on_scan_failed(self, code):
-        self._log(f'[SCAN] Failed {code}')
-        self.stop_scan()
-        self.schedule_reconnect()
-
-    def _on_scan_error(self, msg):
-        self._log(f'[SCAN] Error {msg}')
-        self.stop_scan()
-        self.schedule_reconnect()
-
-    # ---------- 修改后的扫描回调，接收原始广播数据 ----------
-    def _on_scan_device_found(self, addr, name, rssi, record_hex=''):
-        print(f"_on_scan_device_found {addr} {name} {rssi} {record_hex}")
-        if not addr:
-            return
-        if addr in self.seen_devices:
-            return
-        advertis_data = self._parse_advertis_from_record(record_hex, addr)
-        if not advertis_data:
-            advertis_data = self.advertis_data_input.strip()
-            self._log(f'[SCAN] Could not parse advertisData from record, using input: {advertis_data}')
-        self.seen_devices[addr] = {'name': name, 'rssi': rssi, 'advertis': advertis_data}
-        self._log(f'[SCAN] Found {name} {addr} rssi={rssi} advertis={advertis_data}')
-        container = self.root_widget.ids.device_container
-        item = DeviceItem(name, addr, self.on_device_connect)
-        container.add_widget(item)
-
-    # ---------- 广播数据解析方法 ----------
-    def _parse_advertis_from_record(self, record_hex, mac_address):
-        if not record_hex:
-            return None
         try:
-            data = bytes.fromhex(record_hex)
-        except Exception:
-            return None
-        i = 0
-        while i < len(data) - 1:
-            length = data[i]
-            if length == 0 or i + length >= len(data):
-                break
-            ad_type = data[i+1]
-            if ad_type == 0xFF:
-                payload = data[i+2 : i+1+length]
-                if len(payload) >= 2 and payload[0:2] == b'\xA8\x06':
-                    manu_data = payload[2:]
-                    if len(manu_data) >= 9:
-                        sn14_bytes = manu_data[1:15]
-                        sn14 = sn14_bytes.decode('ascii', errors='ignore')
-                        if len(sn14) == 14:
-                            sn8 = sn14[:8]
-                            if len(manu_data) >= 25:
-                                mac_bytes = manu_data[19:25]
-                                mac_rev = bytes(reversed(mac_bytes))
-                                advertis = b'\xAC' + sn8.encode('ascii') + mac_rev
-                                return advertis.hex().upper()
-                        if len(manu_data) >= 10:
-                            sn8_bytes = manu_data[2:10]
-                            try:
-                                sn8 = sn8_bytes.decode('ascii')
-                                if len(sn8) == 8 and sn8.isalnum():
-                                    mac_clean = mac_address.replace(':', '')
-                                    mac_bytes = bytes.fromhex(mac_clean)
-                                    mac_rev = bytes(reversed(mac_bytes))
-                                    advertis = b'\xAC' + sn8.encode('ascii') + mac_rev
-                                    return advertis.hex().upper()
-                            except Exception:
-                                pass
-                    self._log(f'[SCAN] Manu data hex: {manu_data.hex()}')
-                break
-            i += (length + 1)
-        return None
-
-    def on_device_connect(self, mac_addr):
-        self._log(f'[UI] Connect pressed for {mac_addr}')
-        # 优先使用手动输入的值（如果与自动解析的不同）
-        manual_ad = self.advertis_data_input.strip()
-        dev_info = self.seen_devices.get(mac_addr, {})
-        auto_ad = dev_info.get('advertis', '')
-        if manual_ad and manual_ad != auto_ad:
-            advertis_data = manual_ad
-            self._log(f'[UI] Using manually set advertisData: {advertis_data}')
-        else:
-            advertis_data = auto_ad if auto_ad else manual_ad
-        self.current_advertis_data = advertis_data
-        if not self.current_advertis_data:
-            self._set_status('[ERROR] advertisData not set!')
-            return
-        name = dev_info.get('name', '')
-        self.connect_to_device(mac_addr, name, self.current_advertis_data)
-
-    def connect_to_device(self, address, name='', advertis_data_hex=''):
-        self._log(f'[UI] connect_to_device {address} ({name}) advertisData: {advertis_data_hex}')
-        if self.is_connecting or self.is_connected:
-            self.disconnect_gatt(False)
-            Clock.schedule_once(lambda dt: self.connect_to_device(address, name, advertis_data_hex), 0.6)
-            return
-        if not address:
-            return
-        self.disconnect_gatt(False)
-        self.stop_scan()
-        self.is_connecting = True
-        self.is_connected = False
-        self.gatt_ready = False
-        self.control_ready = False
-        self.notification_ready = False
-        self.handshake_done = False
-        self.handshake_started = False
-        self.cccd_retry_count = 0
-        self.mtu_negotiated = False
-        self.mtu_failed = False
-        self.write_queue.clear()
-        self.write_in_progress = False
-        self.rx_buffer = b''
-        self.current_device_addr = address
-        self.current_device_name = name or 'Unknown'
-        self.current_advertis_data = advertis_data_hex
-        self.device_text = f'Device: {self.current_device_name} [{address}]'
-        self.handshake_text = 'Handshake: Connecting'
-        self.connection_generation += 1
-        gen = self.connection_generation
-        self.gatt_callback = PyGattCallback(self, gen, name)
-        self._log(f'[GATT] Connecting to {address}...')
-        try:
-            self.gatt = BleBridge.connectGatt(self.context, String(address), False, 512, self.gatt_callback)
-            if not self.gatt:
-                self.is_connecting = False
-                self.schedule_reconnect()
+            self._pending_start = True
+            camera.play = True
+            Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.6)
+            Clock.schedule_once(lambda dt: self._setup_native_callback(), 1.0)
+            self._set_status('Preview started')
         except Exception as e:
-            self._log(f'[GATT] connect error {e}')
-            self.is_connecting = False
-            self.schedule_reconnect()
+            self._set_status(f'Start failed: {e}')
+            self._log(f'Start camera error: {e}')
+        finally:
+            self._pending_start = False
 
-    def disconnect_gatt(self, clear_target=False):
-        self.is_connecting = False
-        self.is_connected = False
-        self.gatt_ready = False
-        self.control_ready = False
-        self.notification_ready = False
-        self.handshake_done = False
-        self.handshake_started = False
-        self.cccd_retry_count = 0
-        self.mtu_negotiated = False
-        self.mtu_failed = False
-        self.write_queue.clear()
-        self.write_in_progress = False
-        self.connection_generation += 1
-        self.hs_state = 'idle'
-        self._cancel_handshake_timers()
-        self.c2_frame = None
-        self.c3_frame = None
-        self.step_count = 0
-        if self._service_discovery_timeout:
-            self._service_discovery_timeout.cancel()
-            self._service_discovery_timeout = None
-        if self.gatt:
-            try:
-                self.gatt.disconnect()
-                self.gatt.close()
-            except:
-                pass
-            self.gatt = None
-        self.gatt_callback = None
-        self.write_char = None
-        if clear_target:
-            self.current_device_addr = ''
-            self.current_device_name = ''
-            self.current_advertis_data = self.advertis_data_input
-            self.device_text = ''
-        self.handshake_text = ''
-
-    def schedule_reconnect(self, delay=2.5):
-        if self.is_paused:
-            return
-        if self.auto_reconnect_event:
-            try:
-                self.auto_reconnect_event.cancel()
-            except:
-                pass
-        self.auto_reconnect_event = Clock.schedule_once(lambda dt: self.ensure_scan_or_connect(), delay)
-
-    # ---------- GATT 事件处理 ----------
-    def _on_gatt_mtu_changed(self, gen, mtu, status):
-        if gen != self.connection_generation:
-            return
-        self._log(f'[GATT] MTU changed: mtu={mtu} status={status}')
-        if status == 0:
-            self.mtu_negotiated = True
-            self._log('[GATT] MTU negotiated, starting service discovery...')
-            self.handshake_text = 'Handshake: Service Discovery'
-            if self.gatt:
-                self.gatt.discoverServices()
-                self._service_discovery_timeout = Clock.schedule_once(
-                    lambda dt: self._on_service_discovery_timeout(), 10.0)
-        else:
-            self.mtu_failed = True
-            self._log('[GATT] MTU negotiation failed, trying service discovery anyway')
-            if self.gatt:
-                self.gatt.discoverServices()
-                self._service_discovery_timeout = Clock.schedule_once(
-                    lambda dt: self._on_service_discovery_timeout(), 10.0)
-
-    def _on_gatt_connection_state_change(self, gen, status, newState):
-        if gen != self.connection_generation:
-            return
-        if newState == BluetoothProfile.STATE_CONNECTED and status == 0:
-            self.is_connecting = False
-            self.is_connected = True
-            self.mtu_negotiated = False
-            self.mtu_failed = False
-            self._log('[GATT] Connected, waiting for MTU negotiation...')
-            self.handshake_text = 'Handshake: MTU negotiating'
-            # 不再立即发现服务，由 _on_gatt_mtu_changed 触发
-        elif newState == BluetoothProfile.STATE_DISCONNECTED:
-            self._log(f'[GATT] Disconnected status={status}')
-            self.disconnect_gatt(False)
-            self.schedule_reconnect()
-
-    def _on_service_discovery_timeout(self):
-        self._log('[GATT] Service discovery timed out (10s), disconnecting...')
-        self.disconnect_gatt(False)
-        self.schedule_reconnect()
-
-    def _on_gatt_services_discovered(self, gen, status):
-        if self._service_discovery_timeout:
-            self._service_discovery_timeout.cancel()
-            self._service_discovery_timeout = None
-        if gen != self.connection_generation:
-            return
-        self._log(f'[GATT] Services discovered callback, status={status}')
-        if status != 0:
-            self._log(f'[GATT] Service discovery failed {status}')
-            self.disconnect_gatt(False)
-            return
-        if not self.gatt:
+    def _set_camera_orientation(self):
+        camera = self.root_widget.ids.camera
+        if not camera.play:
             return
         try:
-            srv = self.gatt.getService(UUID.fromString(self.MIDEA_SERVICE_UUID))
-            if not srv:
-                self._log('[GATT] FFA0 not found')
-                self.disconnect_gatt(False)
+            internal_camera = camera._camera
+            if internal_camera is None:
+                Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.3)
                 return
+            try:
+                orientation = 90 if camera.index == 0 else 270
+                internal_camera.setDisplayOrientation(orientation)
+                self._log(f'Camera orientation set to {orientation}°')
+            except AttributeError:
+                self._log('setDisplayOrientation not supported, skipped.')
+        except Exception as e:
+            self._log(f'Set orientation failed: {e}')
 
-            self.write_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_WRITE_UUID))
-            if self.write_char:
-                self.write_char.setWriteType(2)
-
-            notify_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_NOTIFY_UUID))
-            if notify_char:
-                props = notify_char.getProperties()
-                self._log(f'[GATT] Notify char properties: {props}')
-                can_notify = (props & 0x10) != 0
-                can_indicate = (props & 0x20) != 0
-                if not can_notify and not can_indicate:
-                    self._log('[GATT] FFA2 does not support notify/indicate, aborting')
-                    self.disconnect_gatt(False)
-                    return
-
-                self.gatt.setCharacteristicNotification(notify_char, True)
-                cccd = notify_char.getDescriptor(UUID.fromString(self.CCCD_UUID))
-                if cccd:
-                    if can_notify:
-                        enable_val = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    else:
-                        enable_val = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                    cccd.setValue(enable_val)
-                    self._log(f'[GATT] Writing CCCD with value: {enable_val[0]:02X} {enable_val[1]:02X}')
-                    ok = self.gatt.writeDescriptor(cccd)
-                    self._log(f'[GATT] writeDescriptor returned: {ok}')
-                    if not ok:
-                        Clock.schedule_once(lambda dt, d=cccd, v=enable_val: self._retry_write_descriptor(d, v), 0.3)
-                else:
-                    self._log('[GATT] CCCD descriptor not found')
+    def _setup_native_callback(self):
+        global GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        camera = self.root_widget.ids.camera
+        if not camera.play:
+            return
+        try:
+            internal_camera = camera._camera
+            if internal_camera and hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
+                native_cam = internal_camera._android_camera
+                params = native_cam.getParameters()
+                w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+                try:
+                    params.setPreviewSize(w, h)
+                    native_cam.setParameters(params)
+                except Exception as e:
+                    self._log(f'Failed to set preview size {w}x{h}: {e}')
+                native_cam.setPreviewCallback(NATIVE_CALLBACK)
+                self._apply_professional_settings()
+                self._set_status(f'Native callback linked at {w}x{h}')
             else:
-                self._log('[GATT] Notify characteristic not found')
-
-            self.gatt_ready = True
-            self._log('[GATT] Services ready')
-            self.device_text = f'Device: {self.current_device_name} [{self.current_device_addr}]  FFA0 ready'
-            self.handshake_text = 'Handshake: waiting for notify setup...'
-
-            if not self.current_advertis_data:
-                self._set_status('[ERROR] AdvertisData not set!')
-                return
-
-            self.protocol.derive_root_key(self.current_advertis_data)
-            self.protocol.create_ec_keypair()
-            self.handshake_started = False
-
+                Clock.schedule_once(lambda dt: self._setup_native_callback(), 0.5)
         except Exception as e:
-            self._log(f'[GATT] Service setup error {e}')
+            self._log(f'Failed to hook native callback: {e}')
 
-    def _retry_write_descriptor(self, cccd, value):
-        if not self.gatt:
+    def _apply_professional_settings(self):
+        camera = self.root_widget.ids.camera
+        if not camera.play:
             return
         try:
-            cccd.setValue(value)
-            ok = self.gatt.writeDescriptor(cccd)
-            self._log(f'[GATT] retry writeDescriptor returned: {ok}')
+            internal_camera = camera._camera
+            if internal_camera is None:
+                return
+            native_cam = None
+            if hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
+                native_cam = internal_camera._android_camera
+            if native_cam is not None:
+                params = native_cam.getParameters()
+                if self.flash_mode == 0:
+                    params.setFlashMode('off')
+                elif self.flash_mode == 1:
+                    params.setFlashMode('torch')
+                else:
+                    params.setFlashMode('auto')
+                try:
+                    params.setExposureCompensation(int(self.brightness_value))
+                except Exception:
+                    pass
+                try:
+                    params.set("saturation", int(self.chroma_value))
+                except Exception:
+                    pass
+                native_cam.setParameters(params)
         except Exception as e:
-            self._log(f'[GATT] retry writeDescriptor error: {e}')
+            self._log(f'Apply hardware settings failed: {e}')
 
-    def _on_gatt_descriptor_write(self, gen, status):
-        if gen != self.connection_generation:
+    def toggle_preview(self):
+        camera = self.root_widget.ids.camera
+        if not self.permissions_ok:
+            self.request_camera_permission()
             return
-        self._log(f'[GATT] onDescriptorWrite status={status}')
-        if status == 0:
-            self.notification_ready = True
-            self._log('[GATT] Notification truly enabled')
-            if not self.handshake_started:
-                self._start_handshake()
-                self.handshake_started = True
+        if camera.play:
+            camera.play = False
+            self._set_status('Preview stopped')
         else:
-            self.cccd_retry_count += 1
-            self._log(f'[GATT] CCCD write failed (attempt {self.cccd_retry_count})')
-            if self.cccd_retry_count >= 3:
-                self._log('[GATT] Too many CCCD failures, disconnecting')
-                self.disconnect_gatt(False)
-                return
-            if self.gatt:
-                try:
-                    srv = self.gatt.getService(UUID.fromString(self.MIDEA_SERVICE_UUID))
-                    if srv:
-                        notify_char = srv.getCharacteristic(UUID.fromString(self.MIDEA_NOTIFY_UUID))
-                        if notify_char:
-                            cccd = notify_char.getDescriptor(UUID.fromString(self.CCCD_UUID))
-                            if cccd:
-                                if self.cccd_retry_count == 1:
-                                    new_val = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                                else:
-                                    new_val = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                                cccd.setValue(new_val)
-                                self.gatt.writeDescriptor(cccd)
-                                self._log(f'[GATT] Retrying CCCD with value: {new_val[0]:02X} {new_val[1]:02X}')
-                except Exception as e:
-                    self._log(f'[GATT] Retry CCCD error: {e}')
+            Clock.schedule_once(lambda dt: self._start_camera_preview(), 0.6)
 
-    # ---------- 握手状态机 ----------
-    def _start_handshake(self):
-        if not self.gatt_ready or not self.write_char:
+    def switch_camera(self):
+        camera = self.root_widget.ids.camera
+        if not self.permissions_ok:
+            self.request_camera_permission()
             return
-        t1 = self.protocol.build_conn_frame(0x01, bytes([1,0,0,0,0,0,0,0,0,0]))
-        self.queue_frame(t1, 't1')    
+        if camera.play:
+            camera.play = False
+            self._set_status('Switching camera...')
+            Clock.schedule_once(lambda dt: self._do_switch_camera(), 0.6)
+        else:
+            self._do_switch_camera()
+
+    def _do_switch_camera(self, *args):
+        camera = self.root_widget.ids.camera
+        new_index = 1 - camera.index
+        camera.index = new_index
+        self._start_camera_preview()
+        self._set_status(f'Switched to camera {"rear" if new_index==0 else "front"}')
+
+    def toggle_flash(self):
+        self.flash_mode = (self.flash_mode + 1) % 3
+        mode_names = ['Off', 'On', 'Auto']
+        self.flash_mode_text = f'Flash: {mode_names[self.flash_mode]}'
+        self._apply_professional_settings()
+
+def preview_html(response_obj):
+    app_instance = App.get_running_app()
+    current_angle = app_instance.preview_angle if app_instance else 270
+    h = html_content.replace("__INITIAL_ANGLE__", str(current_angle))
+    response_obj.set_header("Content-Type", "text/html; charset=utf-8")
+    response_obj.set_data(h.encode('utf-8'))
+
+html_content = r"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Kivy Native Stream Live View</title>
+    <style>
+        body { margin: 0; background-color: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+        #native_stream { width: 100vw; height: 100vh; object-fit: contain; transform-origin: center; transition: transform 0.2s; }
+        .controls { position: fixed; bottom: 20px; left: 0; right: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; z-index: 100; padding: 0 10px; }
+        button { background: rgba(255,255,255,0.2); color: white; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; backdrop-filter: blur(5px); }
+        .settings { background: rgba(0,0,0,0.6); padding: 5px; border-radius: 8px; display: flex; gap: 5px; align-items: center; }
+        select { background: rgba(0,0,0,0.1); border: 1px solid #555; color: white; border-radius: 4px; padding: 5px; }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button onclick="rotate(-90)">↺</button>
+        <button onclick="rotate(90)">↻</button>
+        <button onclick="toggleFullscreen()">FS</button>
+        <button onclick="window.location.reload()" style="background: rgba(200,0,0,0.5);">Refresh</button>
+        <div class="settings">
+            <select id="resolutionSelect"></select>
+            <button onclick="setResolution()" style="background: rgba(0,100,200,0.5);">Apply</button>
+        </div>
+    </div>
+    
+    <script>
+        let angle = __INITIAL_ANGLE__;
+        const rpcPort = "1133";
+        const streamUrl = window.location.protocol + '//' + window.location.hostname + ':1134/mjpeg_stream';
+        
+        const defaultResolutions = [
+            { w: 320, h: 240 },
+            { w: 640, h: 480 },
+            { w: 800, h: 600 },
+            { w: 1024, h: 768 },
+            { w: 1280, h: 720 },
+            { w: 1280, h: 960 },
+            { w: 1920, h: 1080 },
+            { w: 2592, h: 1944 },
+            { w: 3840, h: 2160 }
+        ];
+
+        async function fetchSupportedResolutions() {
+            try {
+                const resp = await fetch(`http://${window.location.hostname}:${rpcPort}/r=app.get_supported_resolutions()`);
+                if (resp.ok) {
+                    const text = await resp.text();
+                    const matches = text.match(/\((\d+)\s*,\s*(\d+)\)/g);
+                    if (matches) {
+                        return matches.map(m => {
+                            const [w, h] = m.replace(/[()]/g, '').split(',').map(Number);
+                            return { w, h };
+                        });
+                    }
+                }
+            } catch (e) {
+                console.warn("Failed to fetch supported resolutions", e);
+            }
+            return defaultResolutions;
+        }
+
+        function populateResolutionSelect(resolutions, currentW, currentH) {
+            const select = document.getElementById('resolutionSelect');
+            select.innerHTML = '';
+            resolutions.forEach(({w, h}) => {
+                const option = document.createElement('option');
+                option.value = `${w},${h}`;
+                option.textContent = `${w} x ${h}`;
+                if (w === currentW && h === currentH) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+            });
+        }
+
+        async function init() {
+            let currentW = 640, currentH = 480;
+            try {
+                const resp = await fetch(`http://${window.location.hostname}:${rpcPort}/r=app.preview_angle-180,GLOBAL_CAM_WIDTH,GLOBAL_CAM_HEIGHT`);
+                const text = await resp.text();
+                const vals = text.replace(/[()]/g, '').split(',').map(s => parseInt(s.trim()));
+                angle = vals[0] || 270;
+                currentW = vals[1] || 640;
+                currentH = vals[2] || 480;
+            } catch(e) { 
+                console.error("RPC Init Error", e); 
+            }
             
-        self._cancel_handshake_timers()
-        self.hs_state = 'c1_wait'
-        self.c1_count = 0
-        self._send_c1()
-        self._schedule_c1_retry()
+            const resolutions = await fetchSupportedResolutions();
+            populateResolutionSelect(resolutions, currentW, currentH);
+            
+            startStream();
+        }
 
-    def _send_c1(self):
-        if not self.gatt_ready or not self.write_char or self.hs_state != 'c1_wait':
-            return
-        frame = self.protocol.build_c1_frame()
-        self.queue_frame(frame, 'c1')
-        self.c1_count += 1
-        self._log(f'[SEC] Sent C1 #{self.c1_count}')
+        function startStream() {
+            const oldImg = document.getElementById('native_stream');
+            if (oldImg) oldImg.remove();
+            
+            const newImg = document.createElement('img');
+            newImg.id = 'native_stream';
+            newImg.style.cssText = "width: 100vw; height: 100vh; object-fit: contain; transform-origin: center; transition: transform 0.2s;";
+            newImg.style.transform = `rotate(${angle}deg) scaleY(-1)`;
+            newImg.src = streamUrl + "?t=" + new Date().getTime();
+            newImg.onerror = () => setTimeout(startStream, 2000);
+            document.body.prepend(newImg);
+        }
 
-    def _schedule_c1_retry(self):
-        if self.c1_timer:
-            self.c1_timer.cancel()
-        self.c1_timer = Clock.schedule_once(lambda dt: self._c1_retry(), 1.5)
+        async function setResolution() {
+            const select = document.getElementById('resolutionSelect');
+            const [w, h] = select.value.split(',').map(Number);
+            if(!w || !h) return;
+            await fetch(`http://${window.location.hostname}:${rpcPort}/r=app.set_preview_resolution(${w},${h})`);
+            console.log(`Resolution set to ${w}x${h}`);
+        }
 
-    def _c1_retry(self):
-        if self.hs_state != 'c1_wait':
-            return
-        if self.c1_count >= 15:
-            self._log('[SEC] C1 timeout')
-            self.disconnect_gatt(False)
-            self.schedule_reconnect()
-            return
-        self.write_queue.clear()
-        self._send_c1()
-        self._schedule_c1_retry()
+        function rotate(deg) {
+            angle = (angle + deg) % 360;
+            const img = document.getElementById('native_stream');
+            if (img) img.style.transform = `rotate(${angle}deg) scaleY(-1)`;
+        }
 
-    def _send_c2(self):
-        if not self.gatt_ready or not self.write_char or self.hs_state != 'c2_wait':
-            return
-        self.c2_frame = self.protocol.build_c2_frame()
-        self.queue_frame(self.c2_frame, 'c2')
-        self.step_count = 0
-        self._log('[SEC] Sent C2')
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+            else document.exitFullscreen();
+        }
 
-    def _send_c3(self):
-        if not self.gatt_ready or not self.write_char or self.hs_state != 'c3_wait':
-            return
-        self.c3_frame = self.protocol.build_c3_frame(self.protocol.ec_pub_64, self.current_advertis_data)
-        self.queue_frame(self.c3_frame, 'c3')
-        self.step_count = 0
-        self._log('[SEC] Sent C3')
+        init();
+    </script>
+</body>
+</html>
+"""
 
-    def _schedule_step_retry(self):
-        if self.step_timer:
-            self.step_timer.cancel()
-        self.step_timer = Clock.schedule_once(lambda dt: self._step_retry(), 1.2)
-
-    def _step_retry(self):
-        if self.hs_state not in ('c2_wait', 'c3_wait'):
-            return
-        self.step_count += 1
-        if self.step_count > 8:
-            self._log('[SEC] Step timeout')
-            self.disconnect_gatt(False)
-            self.schedule_reconnect()
-            return
-        self.write_queue.clear()
-        if self.hs_state == 'c2_wait' and self.c2_frame:
-            self.queue_frame(self.c2_frame, 'c2_retry')
-            self._log('[SEC] Resend C2')
-        elif self.hs_state == 'c3_wait' and self.c3_frame:
-            self.queue_frame(self.c3_frame, 'c3_retry')
-            self._log('[SEC] Resend C3')
-        self._schedule_step_retry()
-
-    def _cancel_handshake_timers(self):
-        for t in ('c1_timer', 'step_timer'):
-            timer = getattr(self, t, None)
-            if timer:
-                timer.cancel()
-                setattr(self, t, None)
-
-    def _on_gatt_characteristic_write(self, gen, status):
-        if gen != self.connection_generation:
-            return
-        self.write_in_progress = False
-        self._log(f'[WRITE] status={status}')
-        if status != 0:
-            self._log(f'[WRITE] status={status} (ignored, keep alive)')
-            Clock.schedule_once(lambda dt: self._write_next(), 0.1)
-            return
-        Clock.schedule_once(lambda dt: self._write_next(), 0)
-
-    def _on_gatt_characteristic_changed(self, gen, hex_value):
-        if gen != self.connection_generation:
-            return
-        data = from_hex(hex_value)
-        self.rx_buffer += data
-        self._process_rx()
-
-    # ---------- RX 处理 ----------
-    def _process_rx(self):
-        while True:
-            res = self.protocol.parse_conn_frame(self.rx_buffer)
-            if not res:
-                break
-            conn_type, payload, frame_len = res
-            self.rx_buffer = self.rx_buffer[frame_len:]
-            if conn_type == self.protocol.CONN_T2:
-                try:
-                    sec = self.protocol.decrypt_security_payload(self.protocol.root_key, payload)
-                    cmd = sec[0]
-                    body = sec[3:] if len(sec) > 3 else b''
-                    if cmd == self.protocol.SEC_C1:
-                        self._log('[SEC] Received C1 response')
-                        if self.hs_state == 'c1_wait':
-                            self._cancel_handshake_timers()
-                            self.hs_state = 'c2_wait'
-                            self._send_c2()
-                            self._schedule_step_retry()
-                    elif cmd == self.protocol.SEC_C2:
-                        self._log(f'[SEC] Received C2, peer_pub={hexstr(body)}')
-                        if len(body) != 64:
-                            self._log('[SEC] Invalid C2 length')
-                            return
-                        if self.hs_state == 'c2_wait':
-                            self._cancel_handshake_timers()
-                            self.protocol.derive_session_key(body)
-                            self.hs_state = 'c3_wait'
-                            self._send_c3()
-                            self._schedule_step_retry()
-                    elif cmd == self.protocol.SEC_C3:
-                        self._log('[SEC] Received C3 result')
-                        if self.hs_state == 'c3_wait':
-                            self._cancel_handshake_timers()
-                            if len(body) >= 1 and body[0] == 1:
-                                self.hs_state = 'biz'
-                                self.handshake_done = True
-                                self.control_ready = True
-                                self.handshake_text = 'Handshake: Completed'
-                                self._set_status('[SEC] Handshake complete')
-                                self.send_query_frame()
-                            else:
-                                self._log('[SEC] Handshake failed')
-                                self.disconnect_gatt(False)
-                                self.schedule_reconnect()
-                except Exception as e:
-                    self._log(f'[SEC] Decrypt error {e}')
-            elif conn_type == self.protocol.CONN_T3:
-                if not self.handshake_done:
-                    return
-                try:
-                    nonce = payload[:8]
-                    ct_tag = payload[8:]
-                    biz = aes_ccm_decrypt(self.protocol.session_key, nonce, ct_tag)
-                    self._log(f'[BIZ] Received {hexstr(biz)}')
-                    status = parse_status_frame(biz)
-                    if status:
-                        self.device_text = (
-                            f'Power: {status["power"]} | Mode: {status["mode"]} | '
-                            f'Set: {status["set_temp"]}°C | Fan: {status["fan"]} | '
-                            f'Room: {status["indoor_temp"]}°C | Outdoor: {status["outdoor_temp"]}°C'
-                        )
-                except Exception as e:
-                    self._log(f'[BIZ] Decrypt error {e}')
-
-    # ---------- 写队列 ----------
-    def queue_frame(self, frame, tag=''):
-        if not self.gatt or not self.is_connected or not self.write_char:
-            return
-        self.write_queue.append((frame, tag))
-        self._write_next()
-
-    def _write_next(self):
-        if self.write_in_progress or not self.write_queue:
-            return
-        if not self.gatt or not self.is_connected or not self.write_char:
-            self.write_queue.clear()
-            return
-        frame, tag = self.write_queue.popleft()
-        self.last_write_tag = tag
-        try:
-            self.write_in_progress = True
-            self.write_char.setValue(frame)
-            ok = self.gatt.writeCharacteristic(self.write_char)
-            self._log(f'[WRITE] => {hexstr(frame)} tag={tag} ok={ok}')
-            if not ok:
-                self.write_in_progress = False
-                Clock.schedule_once(lambda dt: self._write_next(), 0)
-        except Exception as e:
-            self.write_in_progress = False
-            self._log(f'[WRITE] error {e}')
-
-    # ---------- 业务命令 ----------
-    def send_query_frame(self):
-        if not self.control_ready:
-            return
-        query = self.protocol.build_query_frame()
-        biz = self.protocol.build_biz_frame(self.protocol.BIZ_TYPE_AC, query)
-        self.queue_frame(biz, 'query')
-
-    def send_control_frame(self):
-        if not self.control_ready:
-            return
-        ctrl = self.protocol.build_control_frame(self.desired_state)
-        biz = self.protocol.build_biz_frame(self.protocol.BIZ_TYPE_AC, ctrl)
-        self.queue_frame(biz, 'control')
-
-    # ---------- RPC ----------
-    def set_advertis_data(self, hex_str):
-        self.advertis_data_input = hex_str
-        self.current_advertis_data = hex_str
-        self._log(f'[RPC] advertisData set to {hex_str}')
-
-    def rpc_write_hex(self, hex_str):
-        if not self.gatt or not self.is_connected or not self.write_char:
-            self._set_status('[RPC] BLE not connected')
-            return
-        try:
-            data = bytearray.fromhex(hex_str)
-            self.write_char.setValue(data)
-            ok = self.gatt.writeCharacteristic(self.write_char)
-            self._set_status(f'[RPC] Sent: {hex_str} ok={ok}')
-        except Exception as e:
-            self._set_status(f'[RPC] Error: {e}')
-
-    # ---------- UI 操作 ----------
-    def toggle_power(self):
-        self._log('[UI] Power toggle pressed')
-        self.desired_state['power'] = not self.desired_state['power']
-        self._refresh_control_text()
-        self.send_control_frame()
-
-    def on_temp_slider(self, value):
-        new_temp = int(round(value))
-        if new_temp != self.desired_state['temp']:
-            self._log(f'[UI] Temp slider changed to {new_temp}')
-            self.desired_state['temp'] = new_temp
-            self._refresh_control_text()
-            Clock.schedule_once(lambda dt: self.send_control_frame(), 0.25)
-
-    def set_mode(self, mode):
-        self._log(f'[UI] Mode set to {mode}')
-        self.desired_state['mode'] = mode
-        self._refresh_control_text()
-        self.send_control_frame()
-
-    def set_fan(self, fan):
-        self._log(f'[UI] Fan set to {fan}')
-        self.desired_state['fan'] = fan
-        self._refresh_control_text()
-        self.send_control_frame()
-
-if __name__=='__main__':
-    app=HualingACApp()
+if __name__ == '__main__':
+    app = HualingACApp()
     app.run()
+
+
+
+"""
+rpc('''
+import urllib.request
+import ssl
+# 关闭证书校验
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+urllib.request.install_opener(opener)
+
+r=urllib.request.urlretrieve(
+    "https://ghfast.top/https://raw.githubusercontent.com/775cpu/midea-ble-go/main/yolov8n.tflite",
+    "yolov8n_float32.tflite"
+)
+''')
+
+BASE_URL = "http://192.168.1.183:1133/"
+
+def rpc(expression,base=BASE_URL, timeout=10,p=1):
+    if 'r=' not in expression and 'r = 'not in expression:expression='r='+expression
+    import urllib
+    url =base + urllib.parse.quote(expression, safe='')
+    try:
+        s = N.HTTP.get(url, timeout=timeout,print_req=1,headers={})
+        if p:print(s)
+        return s
+    except Exception as e:
+        print(f"[ERROR] RPC 失败: {e} \n请求表达式: {expression[:120]}")
+    return None
+
+
+s=rpc('''
+from qgb import py
+U,T,N,F=py.importUTNF()
+r=F.read('./main.py')
+''',p=0)
+len(s)
+
+38101
+
+
+
+""" 
