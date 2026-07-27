@@ -1,8 +1,10 @@
 # Buildozer / Android
 .buildozer/
-
 *.aab
 *.aar
+
+bin/
+!bin/*.apk
 
 # Python
 __pycache__/

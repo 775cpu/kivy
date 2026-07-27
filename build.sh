@@ -86,6 +86,12 @@ else
     echo "No color provided, skipping icon color update (splash.png and spec)."
 fi
 
+# ---------- 检查 cmake ----------
+if ! command -v cmake &>/dev/null; then
+    echo "cmake 未安装，正在安装..."
+    sudo apt-get update && sudo apt-get install -y cmake
+fi
+
 # ---------- 可重复构建配置 ----------
 FIXED_TIME=1609459200   # 2021-01-01 00:00:00 UTC
 export SOURCE_DATE_EPOCH=$FIXED_TIME
@@ -108,7 +114,7 @@ mkdir -p "$OUT_DIR"
 find "$OUT_DIR" -maxdepth 1 -type f \( -name 'hualing-0.1-arm64-v8a-debug.apk' -o -name 'hualing-0.1-arm64-v8a-debug-*.apk' \) -delete
 
 echo "Building Android APK..."
-buildozer -v android debug 2>&1 | awk 'BEGIN {start=systime()} {now=systime(); printf "[%s][已用时: %ds] %s\n", strftime("%H:%M:%S", now), now-start, $0; fflush()}'
+buildozer -v android debug 2>&1 |stdbuf -i0 awk 'BEGIN {start=systime()} {now=systime(); printf "[%s][已用时: %ds] %s\n", strftime("%H:%M:%S", now), now-start, $0; fflush()}'
 
 SRC="$OUT_DIR/hualing-0.1-arm64-v8a-debug.apk"
 DST="$OUT_DIR/hualing-0.1-arm64-v8a-debug-${TS}.apk"

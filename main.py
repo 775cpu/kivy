@@ -2,7 +2,17 @@
 import rpc
 rpc_server, rpc_thread = rpc.start_rpc_server(port=1133, key='', globals=globals(), locals=locals())
 
-import os, traceback, hashlib, random, struct, pyaes, threading, time, io
+import os
+import traceback
+import hashlib
+import random
+import struct
+import pyaes
+import threading
+import time
+import io
+import json
+
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -10,22 +20,29 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.lang import Builder
 from kivy.metrics import dp
-from kivy.properties import StringProperty, BooleanProperty, NumericProperty, ListProperty
+from kivy.properties import StringProperty, BooleanProperty, NumericProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.uix.camera import Camera
-from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.floatlayout import FloatLayout 
 from kivy.uix.slider import Slider
 from kivy.uix.widget import Widget
-from kivy.graphics import Color, Line, Rectangle
+from kivy.graphics import Color, Line
 
 from jnius import autoclass, PythonJavaClass, java_method, cast
 
 # ------------------- Java classes --------------------
-PythonActivity = autoclass('org.kivy.android.PythonActivity')
+try:
+    PythonActivity = autoclass('org.kivy.android.PythonActivity')
+    YoloBridgeClass = autoclass('org.qgb.yolo.YoloBridge')
+    YoloBridgeInstance = YoloBridgeClass()
+except Exception:
+    PythonActivity = None
+    YoloBridgeClass = None
+    YoloBridgeInstance = None
 Context = autoclass('android.content.Context')
 Build_VERSION = autoclass('android.os.Build$VERSION')
 PackageManager = autoclass('android.content.pm.PackageManager')
@@ -42,59 +59,48 @@ ECPublicKeySpec = autoclass('java.security.spec.ECPublicKeySpec')
 ECPoint = autoclass('java.security.spec.ECPoint')
 BigInteger = autoclass('java.math.BigInteger')
 
-# Android 原生图像处理类
+# Android 原生高性能图像处理类
 YuvImage = autoclass('android.graphics.YuvImage')
 Rect = autoclass('android.graphics.Rect')
 ImageFormat = autoclass('android.graphics.ImageFormat')
 ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
 
-# 全局帧数据（线程安全）
-GLOBAL_JPEG_BYTES = None
-GLOBAL_YUV_DATA = None
+# 全局数据流载体
+GLOBAL_JPEG_BYTES = None 
 GLOBAL_CAM_WIDTH = 640
 GLOBAL_CAM_HEIGHT = 480
+GLOBAL_YUV_DATA = None
 DETECTION_RESULTS = []
 FPS = 0
 
 # 线程锁
-yuv_lock = threading.Lock()
-jpeg_lock = threading.Lock()        # 非阻塞 JPEG 编码锁
 result_lock = threading.Lock()
+yuv_lock = threading.Lock()
 
-# ---------- Pyjnius 原生回调（非阻塞 JPEG 编码）----------
+# ---------- Pyjnius 原生零轮询异步回调接口 ----------
 class AndroidPreviewCallback(PythonJavaClass):
     __javainterfaces__ = ['android/hardware/Camera$PreviewCallback']
     __javacontext__ = 'app'
 
     def __init__(self):
         super().__init__()
-        self.quality = 60  # 适当降低质量以加快压缩速度
 
     @java_method('([BLandroid/hardware/Camera;)V')
     def onPreviewFrame(self, data, camera):
-        global GLOBAL_JPEG_BYTES, GLOBAL_YUV_DATA
+        global GLOBAL_JPEG_BYTES, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT, GLOBAL_YUV_DATA
         try:
             w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
-            # 先转换 Python bytes，供 YOLO 线程使用
-            b_data = bytes(data)
-            with yuv_lock:
-                GLOBAL_YUV_DATA = b_data
-
-            # 非阻塞 JPEG 压缩：如果上一帧还在处理中，直接丢弃本帧
-            if jpeg_lock.acquire(blocking=False):
-                try:
-                    yuv = YuvImage(data, ImageFormat.NV21, w, h, None)
-                    bos = ByteArrayOutputStream()
-                    yuv.compressToJpeg(Rect(0, 0, w, h), self.quality, bos)
-                    GLOBAL_JPEG_BYTES = bos.toByteArray()
-                finally:
-                    jpeg_lock.release()
+            GLOBAL_YUV_DATA = bytes(data)
+            yuv = YuvImage(data, ImageFormat.NV21, w, h, None)
+            bos = ByteArrayOutputStream()
+            yuv.compressToJpeg(Rect(0, 0, w, h), 70, bos)
+            GLOBAL_JPEG_BYTES = bos.toByteArray()
         except Exception as e:
             print(f"[NativeCallbackError] {e}")
 
 NATIVE_CALLBACK = AndroidPreviewCallback()
 
-# ---------- KV UI 定义（包含 YOLO 开关）----------
+# ---------- UI KV Definition ----------
 KV = r'''
 <RootWidget>:
     canvas.before:
@@ -155,7 +161,7 @@ KV = r'''
     BoxLayout:
         orientation: 'vertical'
         size_hint: 1, None
-        height: dp(290)
+        height: dp(260)
         pos_hint: {'x': 0, 'y': 0}
         padding: dp(12)
         spacing: dp(8)
@@ -195,6 +201,12 @@ KV = r'''
                 background_normal: ''
                 background_color: (0.2, 0.8, 0.2, 0.6) if app.yolo_enabled else (0.5, 0.5, 0.5, 0.6)
                 on_release: app.toggle_yolo()
+
+            Button:
+                text: app.flash_mode_text
+                background_normal: ''
+                background_color: (0.5, 0.5, 0.5, 0.6)
+                on_release: app.toggle_flash()
 
         BoxLayout:
             orientation: 'horizontal'
@@ -320,7 +332,7 @@ class PermissionCallback(PythonJavaClass):
     def onRequestPermissionsResult(self, requestCode, permissions, grantResults):
         Clock.schedule_once(lambda dt: self.owner._on_permissions_result(permissions, grantResults), 0)
 
-# ---------- HTTP Stream Server ----------
+# ---------- Native High-Performance Stream Server ----------
 class NativeMJPEGHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/mjpeg_stream'):
@@ -329,36 +341,43 @@ class NativeMJPEGHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-cache, private')
             self.send_header('Pragma', 'no-cache')
             self.end_headers()
+            
             while True:
-                # 安全读取 JPEG 数据（无需锁，因为是原子引用替换）
-                jpeg_bytes = GLOBAL_JPEG_BYTES
-                if jpeg_bytes is None:
+                global GLOBAL_JPEG_BYTES
+                if GLOBAL_JPEG_BYTES is None:
                     time.sleep(0.05)
                     continue
+                
                 try:
+                    jpeg_bytes = bytes(GLOBAL_JPEG_BYTES)
                     self.wfile.write(b'--frame\r\n')
                     self.wfile.write(b'Content-Type: image/jpeg\r\n')
                     self.wfile.write(f'Content-Length: {len(jpeg_bytes)}\r\n\r\n'.encode())
                     self.wfile.write(jpeg_bytes)
                     self.wfile.write(b'\r\n')
-                    time.sleep(0.03)
+                    time.sleep(0.03) 
                 except Exception:
                     break
+        
         elif self.path == '/' or self.path == '/index.html':
             preview_html(self)
+        
         else:
             self.send_response(404)
             self.end_headers()
 
     def set_header(self, key, value):
         self.send_header(key, value)
+        
     def set_data(self, data):
         self.end_headers()
         self.wfile.write(data)
+
     def set_status(self, code):
         self.send_response(code)
+
     def log_message(self, format, *args):
-        pass
+        pass 
 
 def run_stream_server():
     try:
@@ -367,13 +386,9 @@ def run_stream_server():
     except Exception as e:
         print(f"[StreamServer] Error: {e}")
 
-# 全局添加配置变量（放在文件开头全局变量区）
-MODEL_INPUT_WIDTH = 320
-MODEL_INPUT_HEIGHT = 320
-
-# 修改 detection_worker 函数内部
+# ---------- Main Application Deck ----------
 def detection_worker():
-    global DETECTION_RESULTS, FPS, GLOBAL_YUV_DATA, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+    global DETECTION_RESULTS, FPS
     import numpy
     from PIL import Image
 
@@ -383,49 +398,47 @@ def detection_worker():
         try:
             import tensorflow.lite as tflite
         except ImportError:
-            print("[Detection] Error: no tflite")
+            print('[Detection] no tflite runtime available')
             tflite = None
 
     interpreter = None
     input_details = None
     output_details = None
-    input_shape = (MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT)  # 320x320 提速
+    input_shape = (320, 320)
     is_nchw = False
-    model_path = "yolov8n_float32.tflite"
 
-    if tflite and os.path.exists(model_path):
+    if tflite and os.path.exists('yolov8n_float32.tflite'):
         try:
-            interpreter = tflite.Interpreter(model_path=model_path)#, num_threads=4 崩溃
+            interpreter = tflite.Interpreter(model_path='yolov8n_float32.tflite')
             interpreter.allocate_tensors()
             input_details = interpreter.get_input_details()
             output_details = interpreter.get_output_details()
             in_shape = input_details[0]['shape']
-            if len(in_shape) == 4:
-                if in_shape[1] == 3:
-                    is_nchw = True
-                    input_shape = (in_shape[3], in_shape[2])
-                else:
-                    is_nchw = False
-                    input_shape = (in_shape[2], in_shape[1])
-            print(f"[Detection] Loaded. Input {input_shape}, NCHW: {is_nchw}")
+            if len(in_shape) == 4 and in_shape[1] == 3:
+                is_nchw = True
+                input_shape = (in_shape[3], in_shape[2])
+            else:
+                input_shape = (in_shape[2], in_shape[1])
+            print(f'[Detection] loaded model with input shape {input_shape}')
         except Exception as e:
-            print(f"[Detection] Model load error: {e}")
+            print(f'[Detection] model loading failed: {e}')
             interpreter = None
 
     def nv21_to_rgb(data, w, h):
         y_size = w * h
         y = numpy.frombuffer(data[:y_size], dtype=numpy.uint8).reshape((h, w)).astype(numpy.float32)
-        vu = numpy.frombuffer(data[y_size:], dtype=numpy.uint8).reshape((h//2, w//2, 2)).astype(numpy.float32)
-        v = numpy.repeat(numpy.repeat(vu[:,:,0] - 128.0, 2, axis=0), 2, axis=1)
-        u = numpy.repeat(numpy.repeat(vu[:,:,1] - 128.0, 2, axis=0), 2, axis=1)
+        vu = numpy.frombuffer(data[y_size:], dtype=numpy.uint8).reshape((h // 2, w // 2, 2)).astype(numpy.float32)
+        v = numpy.repeat(numpy.repeat(vu[:, :, 0] - 128.0, 2, axis=0), 2, axis=1)
+        u = numpy.repeat(numpy.repeat(vu[:, :, 1] - 128.0, 2, axis=0), 2, axis=1)
         r = numpy.clip(y + 1.402 * v, 0, 255)
         g = numpy.clip(y - 0.344136 * u - 0.714136 * v, 0, 255)
         b = numpy.clip(y + 1.772 * u, 0, 255)
         return numpy.stack([r, g, b], axis=-1).astype(numpy.uint8)
 
     def pure_nms(boxes, scores, iou_thresh=0.45):
-        if len(boxes) == 0: return []
-        x1, y1, x2, y2 = boxes[:,0], boxes[:,1], boxes[:,2], boxes[:,3]
+        if len(boxes) == 0:
+            return []
+        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
         areas = (x2 - x1) * (y2 - y1)
         order = scores.argsort()[::-1]
         keep = []
@@ -436,119 +449,109 @@ def detection_worker():
             yy1 = numpy.maximum(y1[i], y1[order[1:]])
             xx2 = numpy.minimum(x2[i], x2[order[1:]])
             yy2 = numpy.minimum(y2[i], y2[order[1:]])
-            w_inter = numpy.maximum(0, xx2-xx1)
-            h_inter = numpy.maximum(0, yy2-yy1)
+            w_inter = numpy.maximum(0, xx2 - xx1)
+            h_inter = numpy.maximum(0, yy2 - yy1)
             inter = w_inter * h_inter
             ovr = inter / (areas[i] + areas[order[1:]] - inter)
             inds = numpy.where(ovr <= iou_thresh)[0]
-            order = order[inds+1]
+            order = order[inds + 1]
         return keep
+
+    def run_native_bridge(data, width, height):
+        if YoloBridgeInstance is None:
+            return None
+        try:
+            raw = YoloBridgeInstance.runDetection(data, width, height)
+            payload = json.loads(raw)
+            if isinstance(payload, list):
+                return [(float(x1), float(y1), float(x2), float(y2), float(conf), int(label)) for x1, y1, x2, y2, conf, label in payload]
+        except Exception as exc:
+            print(f'[Detection] native bridge failed: {exc}')
+        return None
 
     prev_time = time.time()
     frame_count = 0
-    _last_debug = 0
-
     while True:
         try:
             app = App.get_running_app()
             if app and not app.yolo_enabled:
-                with result_lock: DETECTION_RESULTS = []
+                with result_lock:
+                    DETECTION_RESULTS = []
                 FPS = 0
                 time.sleep(0.1)
                 continue
-        except: pass
+        except Exception:
+            pass
 
         with yuv_lock:
-            data = GLOBAL_YUV_DATA
+            data = GLOBAL_YUV_DATA if 'GLOBAL_YUV_DATA' in globals() else None
+
         if data is None:
-            time.sleep(0.005)
+            time.sleep(0.01)
             continue
 
-        w_cam, h_cam = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
         try:
-            rgb = nv21_to_rgb(data, w_cam, h_cam)
-            pil_img = Image.fromarray(rgb)
-
             boxes = []
-            t_infer = 0
-            if interpreter:
-                resized = pil_img.resize(input_shape)
-                input_data = numpy.array(resized, dtype=numpy.float32) / 255.0
-                if is_nchw:
-                    input_data = numpy.transpose(input_data, (2,0,1))
-                input_data = numpy.expand_dims(input_data, 0)
-
-                interpreter.set_tensor(input_details[0]['index'], input_data)
-                t0 = time.perf_counter()
-                interpreter.invoke()
-                t_infer = time.perf_counter() - t0
-                outputs = interpreter.get_tensor(output_details[0]['index'])
-
-                output = outputs[0]
-                if output.shape[0] < output.shape[1]:
-                    output = output.T
-
-                boxes_raw = output[:, :4]   # cx,cy,w,h (0~1)
-                scores = output[:, 4:]
-                cls_ids = numpy.argmax(scores, axis=1)
-                confs = numpy.max(scores, axis=1)
-
-                mask = confs > 0.25
-                f_boxes = boxes_raw[mask]
-                f_confs = confs[mask]
-                f_cls = cls_ids[mask]
-
-                if len(f_boxes):
-                    # 关键修复：直接反归一化到相机像素坐标
-                    cx = f_boxes[:,0] * w_cam
-                    cy = f_boxes[:,1] * h_cam
-                    bw = f_boxes[:,2] * w_cam
-                    bh = f_boxes[:,3] * h_cam
-
-                    x1 = cx - bw/2.0
-                    y1 = cy - bh/2.0
-                    x2 = cx + bw/2.0
-                    y2 = cy + bh/2.0
-
-                    box_coords = numpy.stack([x1, y1, x2, y2], axis=1)
-                    keep = pure_nms(box_coords, f_confs, 0.45)
-                    for idx in keep:
-                        boxes.append((
-                            float(x1[idx]), float(y1[idx]),
-                            float(x2[idx]), float(y2[idx]),
-                            float(f_confs[idx]), int(f_cls[idx])
-                        ))
-
+            native_boxes = run_native_bridge(data, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT)
+            if native_boxes is not None:
+                boxes = native_boxes
+            else:
+                rgb = nv21_to_rgb(data, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT)
+                pil_img = Image.fromarray(rgb)
+                if interpreter:
+                    resized = pil_img.resize(input_shape)
+                    input_data = numpy.array(resized, dtype=numpy.float32) / 255.0
+                    if is_nchw:
+                        input_data = numpy.transpose(input_data, (2, 0, 1))
+                    input_data = numpy.expand_dims(input_data, 0)
+                    interpreter.set_tensor(input_details[0]['index'], input_data)
+                    interpreter.invoke()
+                    outputs = interpreter.get_tensor(output_details[0]['index'])
+                    output = outputs[0]
+                    if output.shape[0] < output.shape[1]:
+                        output = output.T
+                    boxes_raw = output[:, :4]
+                    scores = output[:, 4:]
+                    cls_ids = numpy.argmax(scores, axis=1)
+                    confs = numpy.max(scores, axis=1)
+                    mask = confs > 0.25
+                    f_boxes = boxes_raw[mask]
+                    f_confs = confs[mask]
+                    f_cls = cls_ids[mask]
+                    if len(f_boxes):
+                        cx = f_boxes[:, 0] * GLOBAL_CAM_WIDTH
+                        cy = f_boxes[:, 1] * GLOBAL_CAM_HEIGHT
+                        bw = f_boxes[:, 2] * GLOBAL_CAM_WIDTH
+                        bh = f_boxes[:, 3] * GLOBAL_CAM_HEIGHT
+                        x1 = cx - bw / 2.0
+                        y1 = cy - bh / 2.0
+                        x2 = cx + bw / 2.0
+                        y2 = cy + bh / 2.0
+                        box_coords = numpy.stack([x1, y1, x2, y2], axis=1)
+                        keep = pure_nms(box_coords, f_confs, 0.45)
+                        for idx in keep:
+                            boxes.append((float(x1[idx]), float(y1[idx]), float(x2[idx]), float(y2[idx]), float(f_confs[idx]), int(f_cls[idx])))
             with result_lock:
                 DETECTION_RESULTS = boxes
-
             now = time.time()
-            if now - _last_debug >= 1.0:
-                _last_debug = now
-                print(f"[Detection] FPS:{frame_count} Boxes:{len(boxes)} Infer:{t_infer*1000:.0f}ms")
-                if boxes: print(f"  Sample {boxes[0]}")
-
             frame_count += 1
             if now - prev_time >= 1.0:
                 FPS = frame_count
                 frame_count = 0
                 prev_time = now
-
         except Exception as e:
-            print(f"[Detection] Error: {e}")
+            print(f'[Detection] error: {e}')
             traceback.print_exc()
-            time.sleep(0.1)
+        time.sleep(0.01)
 
-        time.sleep(0.005)
-        
-        
+
 class HualingACApp(App):
     title_text = StringProperty('Camera Preview')
     status_text = StringProperty('')
     log_text = StringProperty('')
     flash_mode_text = StringProperty('Flash: Off')
     
-    preview_angle = NumericProperty(270)
+    preview_angle = NumericProperty(270)   # 默认270度，竖屏正向
     brightness_value = NumericProperty(0)
     chroma_value = NumericProperty(3)
     yolo_enabled = BooleanProperty(True)
@@ -567,37 +570,30 @@ class HualingACApp(App):
         self._log('App starting...')
         Clock.schedule_once(lambda dt: self.startup(), 0.2)
         
-        # 启动 HTTP 流服务器
-        threading.Thread(target=run_stream_server, daemon=True).start()
-        # 启动检测线程
-        threading.Thread(target=detection_worker, daemon=True).start()
-        # 定时更新检测框和 FPS
-        Clock.schedule_interval(self.update_detection_display, 1.0/15.0)
+        t = threading.Thread(target=run_stream_server, daemon=True)
+        t.start()
+
+        if not getattr(self, '_detection_thread_started', False):
+            self._detection_thread_started = True
+            threading.Thread(target=detection_worker, daemon=True).start()
+        Clock.schedule_interval(self.update_detection_display, 1.0 / 15.0)
         
         return self.root_widget
 
     def toggle_yolo(self):
         self.yolo_enabled = not self.yolo_enabled
-        print(f"[UI] YOLO enabled: {self.yolo_enabled}")
+        self._set_status('YOLO enabled' if self.yolo_enabled else 'YOLO disabled')
 
     def update_detection_display(self, dt):
         if hasattr(self.root_widget.ids, 'fps_label'):
             self.root_widget.ids.fps_label.text = f'FPS: {FPS}'
-        
+
         overlay = self.root_widget.ids.detect_overlay
-        # 首次打印 overlay 尺寸，方便调试
-        if not hasattr(self, '_debug_overlay_printed'):
-            print(f"[Overlay] Size: {overlay.width}x{overlay.height}, Angle: {self.preview_angle}")
-            self._debug_overlay_printed = True
-
         overlay.canvas.clear()
-
         with result_lock:
             results = list(DETECTION_RESULTS)
-
         w_cam, h_cam = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
         w_scr, h_scr = overlay.width, overlay.height
-        
         if w_scr <= 0 or h_scr <= 0 or not results:
             return
 
@@ -607,7 +603,6 @@ class HualingACApp(App):
             for (x1, y1, x2, y2, conf, cls) in results:
                 nx1, ny1 = x1 / w_cam, y1 / h_cam
                 nx2, ny2 = x2 / w_cam, y2 / h_cam
-
                 if angle == 270:
                     sx1, sy1 = ny1 * w_scr, (1 - nx2) * h_scr
                     sx2, sy2 = ny2 * w_scr, (1 - nx1) * h_scr
@@ -617,15 +612,13 @@ class HualingACApp(App):
                 elif angle == 180:
                     sx1, sy1 = (1 - nx2) * w_scr, ny1 * h_scr
                     sx2, sy2 = (1 - nx1) * w_scr, ny2 * h_scr
-                else:  # 0度
+                else:
                     sx1, sy1 = nx1 * w_scr, (1 - ny2) * h_scr
                     sx2, sy2 = nx2 * w_scr, (1 - ny1) * h_scr
-
                 box_w = abs(sx2 - sx1)
                 box_h = abs(sy2 - sy1)
                 left = min(sx1, sx2)
                 bottom = min(sy1, sy2)
-
                 Line(rectangle=(left, bottom, box_w, box_h), width=2.0)
 
     def on_brightness_value(self, instance, value):
@@ -644,6 +637,7 @@ class HualingACApp(App):
         self._set_status(f'Preview orientation locked to {angle} deg')
 
     def get_supported_resolutions(self):
+        """返回摄像头支持的分辨率字符串，格式如 '[(w,h),...]' """
         try:
             cam = self.root_widget.ids.camera
             if cam._camera and hasattr(cam._camera, '_android_camera') and cam._camera._android_camera is not None:
@@ -740,7 +734,9 @@ class HualingACApp(App):
         try:
             self._pending_start = True
             camera.play = True
+            # 设置底层显示方向
             Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.6)
+            # 设置原生回调和预览尺寸
             Clock.schedule_once(lambda dt: self._setup_native_callback(), 1.0)
             self._set_status('Preview started')
         except Exception as e:
@@ -758,12 +754,10 @@ class HualingACApp(App):
             if internal_camera is None:
                 Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.3)
                 return
-            try:
-                orientation = 90 if camera.index == 0 else 270
-                internal_camera.setDisplayOrientation(orientation)
-                self._log(f'Camera orientation set to {orientation}°')
-            except AttributeError:
-                self._log('setDisplayOrientation not supported, skipped.')
+            # 后置摄像头通常需要旋转90°，前置270°才能与UI的旋转角度配合得到正向预览
+            orientation = 90 if camera.index == 0 else 270
+            internal_camera.setDisplayOrientation(orientation)
+            self._log(f'Camera orientation set to {orientation}°')
         except Exception as e:
             self._log(f'Set orientation failed: {e}')
 
@@ -776,6 +770,8 @@ class HualingACApp(App):
             internal_camera = camera._camera
             if internal_camera and hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
                 native_cam = internal_camera._android_camera
+                
+                # 设置预览尺寸为当前的全局宽高
                 params = native_cam.getParameters()
                 w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
                 try:
@@ -783,11 +779,10 @@ class HualingACApp(App):
                     native_cam.setParameters(params)
                 except Exception as e:
                     self._log(f'Failed to set preview size {w}x{h}: {e}')
+                
                 native_cam.setPreviewCallback(NATIVE_CALLBACK)
                 self._apply_professional_settings()
                 self._set_status(f'Native callback linked at {w}x{h}')
-            else:
-                Clock.schedule_once(lambda dt: self._setup_native_callback(), 0.5)
         except Exception as e:
             self._log(f'Failed to hook native callback: {e}')
 
@@ -799,9 +794,11 @@ class HualingACApp(App):
             internal_camera = camera._camera
             if internal_camera is None:
                 return
+
             native_cam = None
             if hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
                 native_cam = internal_camera._android_camera
+                
             if native_cam is not None:
                 params = native_cam.getParameters()
                 if self.flash_mode == 0:
@@ -878,7 +875,7 @@ html_content = r"""
         .controls { position: fixed; bottom: 20px; left: 0; right: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; z-index: 100; padding: 0 10px; }
         button { background: rgba(255,255,255,0.2); color: white; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; backdrop-filter: blur(5px); }
         .settings { background: rgba(0,0,0,0.6); padding: 5px; border-radius: 8px; display: flex; gap: 5px; align-items: center; }
-        select { background: rgba(0,0,0,0.1); border: 1px solid #555; color: white; border-radius: 4px; padding: 5px; }
+        select { background: rgba(255,255,255,0.1); border: 1px solid #555; color: white; border-radius: 4px; padding: 5px; }
     </style>
 </head>
 <body>
@@ -1003,50 +1000,3 @@ html_content = r"""
 if __name__ == '__main__':
     app = HualingACApp()
     app.run()
-
-
-
-"""
-rpc('''
-import urllib.request
-import ssl
-# 关闭证书校验
-ctx = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
-opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
-urllib.request.install_opener(opener)
-
-r=urllib.request.urlretrieve(
-    "https://ghfast.top/https://raw.githubusercontent.com/775cpu/midea-ble-go/main/yolov8n.tflite",
-    "yolov8n_float32.tflite"
-)
-''')
-
-BASE_URL = "http://192.168.1.183:1133/"
-
-def rpc(expression,base=BASE_URL, timeout=10,p=1):
-    if 'r=' not in expression and 'r = 'not in expression:expression='r='+expression
-    import urllib
-    url =base + urllib.parse.quote(expression, safe='')
-    try:
-        s = N.HTTP.get(url, timeout=timeout,print_req=1,headers={})
-        if p:print(s)
-        return s
-    except Exception as e:
-        print(f"[ERROR] RPC 失败: {e} \n请求表达式: {expression[:120]}")
-    return None
-
-
-s=rpc('''
-from qgb import py
-U,T,N,F=py.importUTNF()
-r=F.read('./main.py')
-''',p=0)
-len(s)
-
-38101
-
-
-
-""" 

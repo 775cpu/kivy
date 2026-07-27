@@ -44,13 +44,20 @@ android.archs = arm64-v8a
 # 源码目录配置
 android.add_src = android_src
 
+# JNI/CMake 构建配置
+android.gradle_dependencies = androidx.appcompat:appcompat:1.7.0
+android.cmake = True
+android.ndk_cmake = True
+android.extra_cmake_args = -DANDROID_STL=c++_shared
+
 # 【降级维稳】强制锁定 NDK 版本，避免 r28c 带来的编译工具链崩溃
 android.ndk = 25b
 
 android.allow_backup = True
 android.accept_sdk_license = True
 android.skip_update = False
-android.api = 33
+# androidx.appcompat 1.7.0 需要至少 API 34 的 compileSdk，避免 AAR metadata 检查失败
+android.api = 34
 android.minapi = 24
         #  21=Android 5.0  24=Android7.0【numpy要求】
 android.ndk_api = 24
