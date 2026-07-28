@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <android/asset_manager_jni.h>
 #include <android/log.h>
 #include <vector>
 #include <string>
@@ -42,7 +43,9 @@ static std::string build_result_json(const std::vector<std::array<float, 6>>& bo
     return oss.str();
 }
 
-JNIEXPORT jstring JNICALL Java_org_qgb_yolo_YoloBridge_runDetection(JNIEnv* env, jobject thiz, jbyteArray frame, jint width, jint height) {
+namespace {
+
+jstring run_detection_impl(JNIEnv* env, jobject thiz, jbyteArray frame, jint width, jint height) {
     if (frame == nullptr || width <= 0 || height <= 0) {
         return env->NewStringUTF("[]");
     }
@@ -65,7 +68,7 @@ JNIEXPORT jstring JNICALL Java_org_qgb_yolo_YoloBridge_runDetection(JNIEnv* env,
     return env->NewStringUTF(g_last_result.c_str());
 }
 
-JNIEXPORT jboolean JNICALL Java_org_qgb_yolo_YoloBridge_initModel(JNIEnv* env, jclass klass, jobject context, jstring modelPath) {
+jboolean init_model_impl(JNIEnv* env, jclass klass, jobject context, jstring modelPath) {
     const char* path = env->GetStringUTFChars(modelPath, nullptr);
     if (!path) {
         return JNI_FALSE;
@@ -99,6 +102,24 @@ JNIEXPORT jboolean JNICALL Java_org_qgb_yolo_YoloBridge_initModel(JNIEnv* env, j
     env->DeleteLocalRef(asset_manager);
 
     return init_yolov8_native_model(mgr, model_name) ? JNI_TRUE : JNI_FALSE;
+}
+
+}  // namespace
+
+JNIEXPORT jstring JNICALL Java_org_qgb_yolo_YoloBridge_runDetection___3BII(JNIEnv* env, jobject thiz, jbyteArray frame, jint width, jint height) {
+    return run_detection_impl(env, thiz, frame, width, height);
+}
+
+JNIEXPORT jstring JNICALL Java_org_qgb_yolo_YoloBridge_runDetection(JNIEnv* env, jobject thiz, jbyteArray frame, jint width, jint height) {
+    return run_detection_impl(env, thiz, frame, width, height);
+}
+
+JNIEXPORT jboolean JNICALL Java_org_qgb_yolo_YoloBridge_initModel__Landroid_content_Context_2Ljava_lang_String_2(JNIEnv* env, jclass klass, jobject context, jstring modelPath) {
+    return init_model_impl(env, klass, context, modelPath);
+}
+
+JNIEXPORT jboolean JNICALL Java_org_qgb_yolo_YoloBridge_initModel(JNIEnv* env, jclass klass, jobject context, jstring modelPath) {
+    return init_model_impl(env, klass, context, modelPath);
 }
 
 }
