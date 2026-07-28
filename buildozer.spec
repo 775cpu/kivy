@@ -29,7 +29,7 @@ android.output_res_dir = %(source.dir)s/android_src/res
 android.res_dir = %(source.dir)s/android_src/res
 
 version = 0.1
-requirements = hostpython3==3.11.9,python3==3.11.9,numpy,kivy,able_recipe,pyjnius,pyaes,pillow,ipython,dill,tflite-runtime
+requirements = hostpython3==3.11.9,python3==3.11.9,numpy,kivy,pyjnius,pillow,ipython,dill
 p4a.local_recipes = %(source.dir)s/android_src
 # opencv_python opencv_python_headless 会造成体积巨大 cv2.abi3.so  (70.45 MB)，
 # onnxruntime 动态库（.so 文件）直接打包进了 ARM64（手机 CPU 架构）的 APK 里。当 Android 手机（ARM64）尝试加载这个动态库时，系统的 dlopen 识别到 CPU 架构不匹配（e_machine: 62 代表 x86_64，而 ARM64 应该是 183），从而拒绝加载
@@ -45,13 +45,14 @@ android.archs = arm64-v8a
 android.add_src = android_src
 
 # JNI/CMake 构建配置
-android.gradle_dependencies = androidx.appcompat:appcompat:1.7.0
+android.gradle_dependencies = androidx.appcompat:appcompat:1.6.1
 android.cmake = True
 android.ndk_cmake = True
 android.extra_cmake_args = -DANDROID_STL=c++_shared
 
 # 【降级维稳】强制锁定 NDK 版本，避免 r28c 带来的编译工具链崩溃
 android.ndk = 25b
+android.sdk = 34
 
 android.allow_backup = True
 android.accept_sdk_license = True
@@ -59,7 +60,7 @@ android.skip_update = False
 # androidx.appcompat 1.7.0 需要至少 API 34 的 compileSdk，避免 AAR metadata 检查失败
 android.api = 34
 android.minapi = 24
-        #  21=Android 5.0  24=Android7.0【numpy要求】
+#  21=Android 5.0  24=Android7.0【numpy要求】
 android.ndk_api = 24
 android.private_storage = True
 

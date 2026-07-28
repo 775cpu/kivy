@@ -7,7 +7,6 @@ import traceback
 import hashlib
 import random
 import struct
-import pyaes
 import threading
 import time
 import io
@@ -27,7 +26,7 @@ from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.uix.camera import Camera
-from kivy.uix.floatlayout import FloatLayout 
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.slider import Slider
 from kivy.uix.widget import Widget
 from kivy.graphics import Color, Line
@@ -66,7 +65,7 @@ ImageFormat = autoclass('android.graphics.ImageFormat')
 ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
 
 # 全局数据流载体
-GLOBAL_JPEG_BYTES = None 
+GLOBAL_JPEG_BYTES = None
 GLOBAL_CAM_WIDTH = 640
 GLOBAL_CAM_HEIGHT = 480
 GLOBAL_YUV_DATA = None
@@ -100,7 +99,7 @@ class AndroidPreviewCallback(PythonJavaClass):
 
 NATIVE_CALLBACK = AndroidPreviewCallback()
 
-# ---------- UI KV Definition ----------
+# ---------- UI KV Definition (移除了Camera和detect_overlay，改为动态添加) ----------
 KV = r'''
 <RootWidget>:
     canvas.before:
@@ -110,35 +109,14 @@ KV = r'''
             pos: self.pos
             size: self.size
 
-    Camera:
-        id: camera
-        resolution: (640, 480)
-        play: False
-        allow_stretch: True
-        keep_ratio: False
-        size_hint: None, None
-        size: (root.height, root.width) if (app.preview_angle % 180 != 0) else (root.width, root.height)
-        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
-        canvas.before:
-            PushMatrix
-            Rotate:
-                angle: app.preview_angle
-                origin: self.center
-        canvas.after:
-            PopMatrix
-
-    Widget:
-        id: detect_overlay
-        size_hint: None, None
-        size: (root.height, root.width) if (app.preview_angle % 180 != 0) else (root.width, root.height)
-        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+    # Camera和overlay将在Python中动态添加
 
     BoxLayout:
         orientation: 'vertical'
         pos_hint: {'center_x': 0.5, 'center_y': 0.5}
         size_hint: None, None
         size: (dp(240), dp(100))
-        opacity: 1 if (camera.play and not camera.texture) else 0
+        opacity: 0
         padding: dp(15)
         spacing: dp(10)
         canvas.before:
@@ -185,7 +163,7 @@ KV = r'''
             spacing: dp(8)
 
             Button:
-                text: 'Start' if not camera.play else 'Stop'
+                text: 'Start' if not app.camera_play else 'Stop'
                 background_normal: ''
                 background_color: (0.2, 0.6, 0.2, 0.6)
                 on_release: app.toggle_preview()
@@ -280,7 +258,7 @@ KV = r'''
                     Ellipse:
                         pos: self.x + dp(22), self.y + dp(22)
                         size: self.width - dp(44), self.height - dp(44)
-                
+
                 Button:
                     text: 'UP' if app.preview_angle != 0 else 'UP *'
                     size_hint: None, None
@@ -289,7 +267,7 @@ KV = r'''
                     background_normal: ''
                     background_color: (0.85, 0.45, 0.1, 0.9) if app.preview_angle == 0 else (0.2, 0.2, 0.2, 0.6)
                     on_release: app.set_preview_angle(0)
-                
+
                 Button:
                     text: 'RIGHT' if app.preview_angle != 90 else 'RIGHT *'
                     size_hint: None, None
@@ -298,7 +276,7 @@ KV = r'''
                     background_normal: ''
                     background_color: (0.85, 0.45, 0.1, 0.9) if app.preview_angle == 90 else (0.2, 0.2, 0.2, 0.6)
                     on_release: app.set_preview_angle(90)
-                
+
                 Button:
                     text: 'DOWN' if app.preview_angle != 180 else 'DOWN *'
                     size_hint: None, None
@@ -307,7 +285,7 @@ KV = r'''
                     background_normal: ''
                     background_color: (0.85, 0.45, 0.1, 0.9) if app.preview_angle == 180 else (0.2, 0.2, 0.2, 0.6)
                     on_release: app.set_preview_angle(180)
-                
+
                 Button:
                     text: 'LEFT' if app.preview_angle != 270 else 'LEFT *'
                     size_hint: None, None
@@ -341,13 +319,13 @@ class NativeMJPEGHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-cache, private')
             self.send_header('Pragma', 'no-cache')
             self.end_headers()
-            
+
             while True:
                 global GLOBAL_JPEG_BYTES
                 if GLOBAL_JPEG_BYTES is None:
                     time.sleep(0.05)
                     continue
-                
+
                 try:
                     jpeg_bytes = bytes(GLOBAL_JPEG_BYTES)
                     self.wfile.write(b'--frame\r\n')
@@ -355,20 +333,20 @@ class NativeMJPEGHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f'Content-Length: {len(jpeg_bytes)}\r\n\r\n'.encode())
                     self.wfile.write(jpeg_bytes)
                     self.wfile.write(b'\r\n')
-                    time.sleep(0.03) 
+                    time.sleep(0.03)
                 except Exception:
                     break
-        
+
         elif self.path == '/' or self.path == '/index.html':
             preview_html(self)
-        
+
         else:
             self.send_response(404)
             self.end_headers()
 
     def set_header(self, key, value):
         self.send_header(key, value)
-        
+
     def set_data(self, data):
         self.end_headers()
         self.wfile.write(data)
@@ -377,7 +355,7 @@ class NativeMJPEGHandler(BaseHTTPRequestHandler):
         self.send_response(code)
 
     def log_message(self, format, *args):
-        pass 
+        pass
 
 def run_stream_server():
     try:
@@ -386,77 +364,11 @@ def run_stream_server():
     except Exception as e:
         print(f"[StreamServer] Error: {e}")
 
-# ---------- Main Application Deck ----------
+# ---------- 检测线程（仅保留原生YoloBridge） ----------
 def detection_worker():
     global DETECTION_RESULTS, FPS
-    import numpy
-    from PIL import Image
 
-    try:
-        import tflite_runtime.interpreter as tflite
-    except ImportError:
-        try:
-            import tensorflow.lite as tflite
-        except ImportError:
-            print('[Detection] no tflite runtime available')
-            tflite = None
-
-    interpreter = None
-    input_details = None
-    output_details = None
-    input_shape = (320, 320)
-    is_nchw = False
-
-    if tflite and os.path.exists('yolov8n_float32.tflite'):
-        try:
-            interpreter = tflite.Interpreter(model_path='yolov8n_float32.tflite')
-            interpreter.allocate_tensors()
-            input_details = interpreter.get_input_details()
-            output_details = interpreter.get_output_details()
-            in_shape = input_details[0]['shape']
-            if len(in_shape) == 4 and in_shape[1] == 3:
-                is_nchw = True
-                input_shape = (in_shape[3], in_shape[2])
-            else:
-                input_shape = (in_shape[2], in_shape[1])
-            print(f'[Detection] loaded model with input shape {input_shape}')
-        except Exception as e:
-            print(f'[Detection] model loading failed: {e}')
-            interpreter = None
-
-    def nv21_to_rgb(data, w, h):
-        y_size = w * h
-        y = numpy.frombuffer(data[:y_size], dtype=numpy.uint8).reshape((h, w)).astype(numpy.float32)
-        vu = numpy.frombuffer(data[y_size:], dtype=numpy.uint8).reshape((h // 2, w // 2, 2)).astype(numpy.float32)
-        v = numpy.repeat(numpy.repeat(vu[:, :, 0] - 128.0, 2, axis=0), 2, axis=1)
-        u = numpy.repeat(numpy.repeat(vu[:, :, 1] - 128.0, 2, axis=0), 2, axis=1)
-        r = numpy.clip(y + 1.402 * v, 0, 255)
-        g = numpy.clip(y - 0.344136 * u - 0.714136 * v, 0, 255)
-        b = numpy.clip(y + 1.772 * u, 0, 255)
-        return numpy.stack([r, g, b], axis=-1).astype(numpy.uint8)
-
-    def pure_nms(boxes, scores, iou_thresh=0.45):
-        if len(boxes) == 0:
-            return []
-        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-        areas = (x2 - x1) * (y2 - y1)
-        order = scores.argsort()[::-1]
-        keep = []
-        while order.size > 0:
-            i = order[0]
-            keep.append(i)
-            xx1 = numpy.maximum(x1[i], x1[order[1:]])
-            yy1 = numpy.maximum(y1[i], y1[order[1:]])
-            xx2 = numpy.minimum(x2[i], x2[order[1:]])
-            yy2 = numpy.minimum(y2[i], y2[order[1:]])
-            w_inter = numpy.maximum(0, xx2 - xx1)
-            h_inter = numpy.maximum(0, yy2 - yy1)
-            inter = w_inter * h_inter
-            ovr = inter / (areas[i] + areas[order[1:]] - inter)
-            inds = numpy.where(ovr <= iou_thresh)[0]
-            order = order[inds + 1]
-        return keep
-
+    # 原生检测函数（直接使用全局桥接）
     def run_native_bridge(data, width, height):
         if YoloBridgeInstance is None:
             return None
@@ -495,42 +407,8 @@ def detection_worker():
             native_boxes = run_native_bridge(data, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT)
             if native_boxes is not None:
                 boxes = native_boxes
-            else:
-                rgb = nv21_to_rgb(data, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT)
-                pil_img = Image.fromarray(rgb)
-                if interpreter:
-                    resized = pil_img.resize(input_shape)
-                    input_data = numpy.array(resized, dtype=numpy.float32) / 255.0
-                    if is_nchw:
-                        input_data = numpy.transpose(input_data, (2, 0, 1))
-                    input_data = numpy.expand_dims(input_data, 0)
-                    interpreter.set_tensor(input_details[0]['index'], input_data)
-                    interpreter.invoke()
-                    outputs = interpreter.get_tensor(output_details[0]['index'])
-                    output = outputs[0]
-                    if output.shape[0] < output.shape[1]:
-                        output = output.T
-                    boxes_raw = output[:, :4]
-                    scores = output[:, 4:]
-                    cls_ids = numpy.argmax(scores, axis=1)
-                    confs = numpy.max(scores, axis=1)
-                    mask = confs > 0.25
-                    f_boxes = boxes_raw[mask]
-                    f_confs = confs[mask]
-                    f_cls = cls_ids[mask]
-                    if len(f_boxes):
-                        cx = f_boxes[:, 0] * GLOBAL_CAM_WIDTH
-                        cy = f_boxes[:, 1] * GLOBAL_CAM_HEIGHT
-                        bw = f_boxes[:, 2] * GLOBAL_CAM_WIDTH
-                        bh = f_boxes[:, 3] * GLOBAL_CAM_HEIGHT
-                        x1 = cx - bw / 2.0
-                        y1 = cy - bh / 2.0
-                        x2 = cx + bw / 2.0
-                        y2 = cy + bh / 2.0
-                        box_coords = numpy.stack([x1, y1, x2, y2], axis=1)
-                        keep = pure_nms(box_coords, f_confs, 0.45)
-                        for idx in keep:
-                            boxes.append((float(x1[idx]), float(y1[idx]), float(x2[idx]), float(y2[idx]), float(f_confs[idx]), int(f_cls[idx])))
+            # 若原生桥接返回None则无检测结果，boxes保持空列表
+
             with result_lock:
                 DETECTION_RESULTS = boxes
             now = time.time()
@@ -550,11 +428,12 @@ class HualingACApp(App):
     status_text = StringProperty('')
     log_text = StringProperty('')
     flash_mode_text = StringProperty('Flash: Off')
-    
+
     preview_angle = NumericProperty(270)   # 默认270度，竖屏正向
     brightness_value = NumericProperty(0)
     chroma_value = NumericProperty(3)
     yolo_enabled = BooleanProperty(True)
+    camera_play = BooleanProperty(False)   # 新增属性用于绑定UI按钮
 
     def build(self):
         self.root_widget = RootWidget()
@@ -564,21 +443,291 @@ class HualingACApp(App):
 
         self.is_paused = False
         self.permissions_ok = False
-        self.flash_mode = 0  
-        self._pending_start = False  
+        self.flash_mode = 0
+        self._pending_start = False
+
+        # 摄像头和覆盖层将在权限授予后创建
+        self.camera_widget = None
+        self.overlay_widget = None
 
         self._log('App starting...')
-        Clock.schedule_once(lambda dt: self.startup(), 0.2)
-        
+        if YoloBridgeClass is not None and self.context is not None:
+            try:
+                YoloBridgeClass.initModelFromAssets(self.context)
+                self._log('YOLO native runtime initialized')
+            except Exception as exc:
+                self._log(f'YOLO native init failed: {exc}')
+
+        # 启动流服务器（与权限无关）
         t = threading.Thread(target=run_stream_server, daemon=True)
         t.start()
 
+        # 启动检测线程（依赖摄像头数据，但会等待数据到来）
         if not getattr(self, '_detection_thread_started', False):
             self._detection_thread_started = True
             threading.Thread(target=detection_worker, daemon=True).start()
         Clock.schedule_interval(self.update_detection_display, 1.0 / 15.0)
-        
+
+        # 请求权限（异步）
+        Clock.schedule_once(lambda dt: self.request_permissions(), 0.2)
+
         return self.root_widget
+
+    # ---------- 新权限系统 ----------
+    def _required_permissions(self):
+        """根据Android版本返回需要动态申请的危险权限列表"""
+        from jnius import autoclass
+        VERSION = autoclass('android.os.Build$VERSION')
+        sdk = VERSION.SDK_INT
+
+        dynamic_perms = []
+
+        # 基础危险权限
+        dynamic_perms.append("android.permission.CAMERA")
+        dynamic_perms.append("android.permission.RECORD_AUDIO")
+        dynamic_perms.append("android.permission.READ_PHONE_STATE")
+
+        # 存储权限适配
+        if sdk >= 33:  # Android 13+
+            dynamic_perms.extend([
+                "android.permission.READ_MEDIA_IMAGES",
+                "android.permission.READ_MEDIA_VIDEO",
+                "android.permission.READ_MEDIA_AUDIO",
+                "android.permission.POST_NOTIFICATIONS"
+            ])
+        else:  # Android 12 及以下
+            dynamic_perms.extend([
+                "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.WRITE_EXTERNAL_STORAGE"
+            ])
+
+        # 蓝牙与定位权限适配
+        if sdk >= 31:  # Android 12+
+            dynamic_perms.extend([
+                "android.permission.BLUETOOTH_SCAN",
+                "android.permission.BLUETOOTH_CONNECT",
+                "android.permission.ACCESS_FINE_LOCATION"
+            ])
+        else:  # Android 11 及以下
+            dynamic_perms.extend([
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.ACCESS_COARSE_LOCATION"
+            ])
+
+        return dynamic_perms
+
+    def request_permissions(self):
+        perms = self._required_permissions()
+        missing = [p for p in perms if self.activity.checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED]
+        if not missing:
+            self.permissions_ok = True
+            Clock.schedule_once(lambda dt: self._on_permission_granted(), 0.2)
+            return
+        self._set_status('[PERM] Requesting permissions...')
+        self.activity.addPermissionsCallback(self.permission_callback)
+        self.activity.requestPermissions(missing, 1001)
+
+    def _on_permissions_result(self, permissions, grantResults):
+        ok = True
+        if grantResults is None:
+            ok = False
+        else:
+            for i in range(len(grantResults)):
+                if int(grantResults[i]) != PackageManager.PERMISSION_GRANTED:
+                    ok = False
+                    break
+        self.permissions_ok = ok
+        if ok:
+            self._set_status('[PERM] Permissions granted')
+            Clock.schedule_once(lambda dt: self._on_permission_granted(), 0.2)
+        else:
+            self._set_status('[PERM] Permission denied')
+
+    def _on_permission_granted(self):
+        """权限已获取，初始化摄像头并启动预览"""
+        self._init_camera_and_overlay()
+        self._start_camera_preview()
+
+    # ---------- 动态创建摄像头和覆盖层 ----------
+    def _init_camera_and_overlay(self):
+        if self.camera_widget is not None:
+            return  # 已创建
+
+        root = self.root_widget
+
+        # 创建摄像头
+        camera = Camera(resolution=(640, 480), play=False, allow_stretch=True, keep_ratio=False,
+                        size_hint=(None, None), index=0)
+        self.camera_widget = camera
+
+        # 创建覆盖层
+        overlay = Widget(size_hint=(None, None))
+        self.overlay_widget = overlay
+
+        # 添加到RootWidget（插入到最底层，位于控制栏下方）
+        root.add_widget(camera, index=0)
+        root.add_widget(overlay, index=1)
+
+        # 为覆盖层绑定尺寸变化
+        camera.bind(size=self._update_overlay_size)
+        root.bind(size=self._update_overlay_size)
+
+        # 初始设置尺寸
+        Clock.schedule_once(lambda dt: self._update_overlay_size(), 0.1)
+
+    def _update_overlay_size(self, *args):
+        if self.camera_widget is None or self.overlay_widget is None:
+            return
+        angle = self.preview_angle
+        root = self.root_widget
+        if angle % 180 != 0:
+            w, h = root.height, root.width
+        else:
+            w, h = root.width, root.height
+        self.camera_widget.size = (w, h)
+        self.camera_widget.pos_hint = {'center_x': 0.5, 'center_y': 0.5}
+        self.overlay_widget.size = (w, h)
+        self.overlay_widget.pos_hint = {'center_x': 0.5, 'center_y': 0.5}
+
+    # ---------- 原有方法，修改为使用动态camera ----------
+    def _start_camera_preview(self):
+        if self.camera_widget is None:
+            self._log('Camera not initialized')
+            return
+        if self.camera_widget.play or self._pending_start:
+            return
+        try:
+            self._pending_start = True
+            self.camera_widget.play = True
+            self.camera_play = True
+            # 设置底层显示方向
+            Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.6)
+            # 设置原生回调和预览尺寸
+            Clock.schedule_once(lambda dt: self._setup_native_callback(), 1.0)
+            self._set_status('Preview started')
+        except Exception as e:
+            self._set_status(f'Start failed: {e}')
+            self._log(f'Start camera error: {e}')
+        finally:
+            self._pending_start = False
+
+    def _set_camera_orientation(self):
+        camera = self.camera_widget
+        if not camera or not camera.play:
+            return
+        try:
+            internal_camera = camera._camera
+            if internal_camera is None:
+                Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.3)
+                return
+            orientation = 90 if camera.index == 0 else 270
+            internal_camera.setDisplayOrientation(orientation)
+            self._log(f'Camera orientation set to {orientation}°')
+        except Exception as e:
+            self._log(f'Set orientation failed: {e}')
+
+    def _setup_native_callback(self):
+        global GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+        camera = self.camera_widget
+        if not camera or not camera.play:
+            return
+        try:
+            internal_camera = camera._camera
+            if internal_camera and hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
+                native_cam = internal_camera._android_camera
+
+                params = native_cam.getParameters()
+                w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
+                try:
+                    params.setPreviewSize(w, h)
+                    native_cam.setParameters(params)
+                except Exception as e:
+                    self._log(f'Failed to set preview size {w}x{h}: {e}')
+
+                native_cam.setPreviewCallback(NATIVE_CALLBACK)
+                self._apply_professional_settings()
+                self._set_status(f'Native callback linked at {w}x{h}')
+        except Exception as e:
+            self._log(f'Failed to hook native callback: {e}')
+
+    def _apply_professional_settings(self):
+        camera = self.camera_widget
+        if not camera or not camera.play:
+            return
+        try:
+            internal_camera = camera._camera
+            if internal_camera is None:
+                return
+
+            native_cam = None
+            if hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
+                native_cam = internal_camera._android_camera
+
+            if native_cam is not None:
+                params = native_cam.getParameters()
+                if self.flash_mode == 0:
+                    params.setFlashMode('off')
+                elif self.flash_mode == 1:
+                    params.setFlashMode('torch')
+                else:
+                    params.setFlashMode('auto')
+                try:
+                    params.setExposureCompensation(int(self.brightness_value))
+                except Exception:
+                    pass
+                try:
+                    params.set("saturation", int(self.chroma_value))
+                except Exception:
+                    pass
+                native_cam.setParameters(params)
+        except Exception as e:
+            self._log(f'Apply hardware settings failed: {e}')
+
+    def toggle_preview(self):
+        if not self.permissions_ok:
+            self.request_permissions()
+            return
+        camera = self.camera_widget
+        if camera is None:
+            self._init_camera_and_overlay()
+            Clock.schedule_once(lambda dt: self.toggle_preview(), 0.3)
+            return
+        if camera.play:
+            camera.play = False
+            self.camera_play = False
+            self._set_status('Preview stopped')
+        else:
+            Clock.schedule_once(lambda dt: self._start_camera_preview(), 0.6)
+
+    def switch_camera(self):
+        if not self.permissions_ok:
+            self.request_permissions()
+            return
+        camera = self.camera_widget
+        if camera is None:
+            return
+        if camera.play:
+            camera.play = False
+            self.camera_play = False
+            self._set_status('Switching camera...')
+            Clock.schedule_once(lambda dt: self._do_switch_camera(), 0.6)
+        else:
+            self._do_switch_camera()
+
+    def _do_switch_camera(self, *args):
+        camera = self.camera_widget
+        if camera is None:
+            return
+        new_index = 1 - camera.index
+        camera.index = new_index
+        self._start_camera_preview()
+        self._set_status(f'Switched to camera {"rear" if new_index==0 else "front"}')
+
+    def toggle_flash(self):
+        self.flash_mode = (self.flash_mode + 1) % 3
+        mode_names = ['Off', 'On', 'Auto']
+        self.flash_mode_text = f'Flash: {mode_names[self.flash_mode]}'
+        self._apply_professional_settings()
 
     def toggle_yolo(self):
         self.yolo_enabled = not self.yolo_enabled
@@ -588,7 +737,9 @@ class HualingACApp(App):
         if hasattr(self.root_widget.ids, 'fps_label'):
             self.root_widget.ids.fps_label.text = f'FPS: {FPS}'
 
-        overlay = self.root_widget.ids.detect_overlay
+        overlay = self.overlay_widget
+        if overlay is None:
+            return
         overlay.canvas.clear()
         with result_lock:
             results = list(DETECTION_RESULTS)
@@ -629,18 +780,14 @@ class HualingACApp(App):
 
     def set_preview_angle(self, angle):
         self.preview_angle = angle
-        overlay = self.root_widget.ids.detect_overlay
-        if angle % 180 != 0:
-            overlay.size = (self.root_widget.height, self.root_widget.width)
-        else:
-            overlay.size = (self.root_widget.width, self.root_widget.height)
+        self._update_overlay_size()
         self._set_status(f'Preview orientation locked to {angle} deg')
 
     def get_supported_resolutions(self):
         """返回摄像头支持的分辨率字符串，格式如 '[(w,h),...]' """
         try:
-            cam = self.root_widget.ids.camera
-            if cam._camera and hasattr(cam._camera, '_android_camera') and cam._camera._android_camera is not None:
+            cam = self.camera_widget
+            if cam and cam._camera and hasattr(cam._camera, '_android_camera') and cam._camera._android_camera is not None:
                 sizes = cam._camera._android_camera.getParameters().getSupportedPreviewSizes()
                 res = [(s.width, s.height) for s in sizes]
                 return str(res)
@@ -655,9 +802,10 @@ class HualingACApp(App):
         GLOBAL_CAM_WIDTH = w
         GLOBAL_CAM_HEIGHT = h
         self._set_status(f'Resolution set to {w}x{h}, restarting preview...')
-        camera = self.root_widget.ids.camera
-        if camera.play:
+        camera = self.camera_widget
+        if camera and camera.play:
             camera.play = False
+            self.camera_play = False
             Clock.schedule_once(lambda dt: self._start_camera_preview(), 0.6)
         else:
             self._start_camera_preview()
@@ -678,182 +826,18 @@ class HualingACApp(App):
 
     def on_pause(self):
         self.is_paused = True
-        camera = self.root_widget.ids.camera
-        if camera.play:
-            camera.play = False
+        if self.camera_widget and self.camera_widget.play:
+            self.camera_widget.play = False
+            self.camera_play = False
         return True
 
     def on_resume(self):
         self.is_paused = False
 
     def on_stop(self):
-        camera = self.root_widget.ids.camera
-        if camera.play:
-            camera.play = False
-
-    def startup(self):
-        self.request_camera_permission()
-
-    def _required_permissions(self):
-        return ["android.permission.CAMERA"]
-
-    def request_camera_permission(self):
-        perms = self._required_permissions()
-        missing = [p for p in perms if self.activity.checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED]
-        if not missing:
-            self.permissions_ok = True
-            Clock.schedule_once(lambda dt: self._on_permission_granted(), 0.2)
-            return
-        self._set_status('Requesting CAMERA permission...')
-        self.activity.addPermissionsCallback(self.permission_callback)
-        self.activity.requestPermissions(missing, 1001)
-
-    def _on_permissions_result(self, permissions, grantResults):
-        ok = True
-        if grantResults is None:
-            ok = False
-        else:
-            for i in range(len(grantResults)):
-                if int(grantResults[i]) != PackageManager.PERMISSION_GRANTED:
-                    ok = False
-                    break
-        self.permissions_ok = ok
-        if ok:
-            self._set_status('Camera permission granted')
-            Clock.schedule_once(lambda dt: self._on_permission_granted(), 0.2)
-        else:
-            self._set_status('Camera permission denied')
-
-    def _on_permission_granted(self):
-        self._start_camera_preview()
-
-    def _start_camera_preview(self):
-        camera = self.root_widget.ids.camera
-        if camera.play or self._pending_start:
-            return
-        try:
-            self._pending_start = True
-            camera.play = True
-            # 设置底层显示方向
-            Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.6)
-            # 设置原生回调和预览尺寸
-            Clock.schedule_once(lambda dt: self._setup_native_callback(), 1.0)
-            self._set_status('Preview started')
-        except Exception as e:
-            self._set_status(f'Start failed: {e}')
-            self._log(f'Start camera error: {e}')
-        finally:
-            self._pending_start = False
-
-    def _set_camera_orientation(self):
-        camera = self.root_widget.ids.camera
-        if not camera.play:
-            return
-        try:
-            internal_camera = camera._camera
-            if internal_camera is None:
-                Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.3)
-                return
-            # 后置摄像头通常需要旋转90°，前置270°才能与UI的旋转角度配合得到正向预览
-            orientation = 90 if camera.index == 0 else 270
-            internal_camera.setDisplayOrientation(orientation)
-            self._log(f'Camera orientation set to {orientation}°')
-        except Exception as e:
-            self._log(f'Set orientation failed: {e}')
-
-    def _setup_native_callback(self):
-        global GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
-        camera = self.root_widget.ids.camera
-        if not camera.play:
-            return
-        try:
-            internal_camera = camera._camera
-            if internal_camera and hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
-                native_cam = internal_camera._android_camera
-                
-                # 设置预览尺寸为当前的全局宽高
-                params = native_cam.getParameters()
-                w, h = GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT
-                try:
-                    params.setPreviewSize(w, h)
-                    native_cam.setParameters(params)
-                except Exception as e:
-                    self._log(f'Failed to set preview size {w}x{h}: {e}')
-                
-                native_cam.setPreviewCallback(NATIVE_CALLBACK)
-                self._apply_professional_settings()
-                self._set_status(f'Native callback linked at {w}x{h}')
-        except Exception as e:
-            self._log(f'Failed to hook native callback: {e}')
-
-    def _apply_professional_settings(self):
-        camera = self.root_widget.ids.camera
-        if not camera.play:
-            return
-        try:
-            internal_camera = camera._camera
-            if internal_camera is None:
-                return
-
-            native_cam = None
-            if hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
-                native_cam = internal_camera._android_camera
-                
-            if native_cam is not None:
-                params = native_cam.getParameters()
-                if self.flash_mode == 0:
-                    params.setFlashMode('off')
-                elif self.flash_mode == 1:
-                    params.setFlashMode('torch')
-                else:
-                    params.setFlashMode('auto')
-                try:
-                    params.setExposureCompensation(int(self.brightness_value))
-                except Exception:
-                    pass
-                try:
-                    params.set("saturation", int(self.chroma_value))
-                except Exception:
-                    pass
-                native_cam.setParameters(params)
-        except Exception as e:
-            self._log(f'Apply hardware settings failed: {e}')
-
-    def toggle_preview(self):
-        camera = self.root_widget.ids.camera
-        if not self.permissions_ok:
-            self.request_camera_permission()
-            return
-        if camera.play:
-            camera.play = False
-            self._set_status('Preview stopped')
-        else:
-            Clock.schedule_once(lambda dt: self._start_camera_preview(), 0.6)
-
-    def switch_camera(self):
-        camera = self.root_widget.ids.camera
-        if not self.permissions_ok:
-            self.request_camera_permission()
-            return
-        if camera.play:
-            camera.play = False
-            self._set_status('Switching camera...')
-            Clock.schedule_once(lambda dt: self._do_switch_camera(), 0.6)
-        else:
-            self._do_switch_camera()
-
-    def _do_switch_camera(self, *args):
-        camera = self.root_widget.ids.camera
-        new_index = 1 - camera.index
-        camera.index = new_index
-        self._start_camera_preview()
-        self._set_status(f'Switched to camera {"rear" if new_index==0 else "front"}')
-
-    def toggle_flash(self):
-        self.flash_mode = (self.flash_mode + 1) % 3
-        mode_names = ['Off', 'On', 'Auto']
-        self.flash_mode_text = f'Flash: {mode_names[self.flash_mode]}'
-        self._apply_professional_settings()
+        if self.camera_widget and self.camera_widget.play:
+            self.camera_widget.play = False
+            self.camera_play = False
 
 def preview_html(response_obj):
     app_instance = App.get_running_app()
@@ -889,12 +873,12 @@ html_content = r"""
             <button onclick="setResolution()" style="background: rgba(0,100,200,0.5);">Apply</button>
         </div>
     </div>
-    
+
     <script>
         let angle = __INITIAL_ANGLE__;
         const rpcPort = "1133";
         const streamUrl = window.location.protocol + '//' + window.location.hostname + ':1134/mjpeg_stream';
-        
+
         const defaultResolutions = [
             { w: 320, h: 240 },
             { w: 640, h: 480 },
@@ -949,20 +933,20 @@ html_content = r"""
                 angle = vals[0] || 270;
                 currentW = vals[1] || 640;
                 currentH = vals[2] || 480;
-            } catch(e) { 
-                console.error("RPC Init Error", e); 
+            } catch(e) {
+                console.error("RPC Init Error", e);
             }
-            
+
             const resolutions = await fetchSupportedResolutions();
             populateResolutionSelect(resolutions, currentW, currentH);
-            
+
             startStream();
         }
 
         function startStream() {
             const oldImg = document.getElementById('native_stream');
             if (oldImg) oldImg.remove();
-            
+
             const newImg = document.createElement('img');
             newImg.id = 'native_stream';
             newImg.style.cssText = "width: 100vw; height: 100vh; object-fit: contain; transform-origin: center; transition: transform 0.2s;";

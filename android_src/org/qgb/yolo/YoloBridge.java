@@ -17,4 +17,13 @@ public class YoloBridge {
     public native String runDetection(byte[] frame, int width, int height);
 
     public static native boolean initModel(Context context, String modelPath);
+
+    public static boolean initModelFromAssets(Context context) {
+        try {
+            return initModel(context, "yolov8n.param");
+        } catch (Throwable t) {
+            Log.w(TAG, "initModelFromAssets failed: " + t.getMessage());
+            return false;
+        }
+    }
 }

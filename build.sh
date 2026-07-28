@@ -88,8 +88,49 @@ fi
 
 # ---------- 检查 cmake ----------
 if ! command -v cmake &>/dev/null; then
+    echo "正在配置上海时区..."
+    sudo ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+    echo "Asia/Shanghai" | sudo tee /etc/timezone > /dev/null
+
+    # 2. 配置 24 小时制时间 (LC_TIME=C)
+    sed -i '/export LC_TIME=/d' ~/.profile
+    echo 'export LC_TIME=C' >> ~/.profile
+    export LC_TIME=C
+
+    # 3. 安装 cmake
     echo "cmake 未安装，正在安装..."
     sudo apt-get update && sudo apt-get install -y cmake
+fi
+
+# ---------- 修复 python-for-android 的 pip 升级冲突 ----------
+P4A_BUILD_FILE=".buildozer/android/platform/python-for-android/pythonforandroid/build.py"
+if [ -f "$P4A_BUILD_FILE" ]; then
+    python3 - <<'PY' "$P4A_BUILD_FILE"
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = '''        # Prepare base environment and upgrade pip:
+        base_env = dict(copy.copy(os.environ))
+        base_env["PYTHONPATH"] = ctx.get_site_packages_dir(arch)
+        info('Upgrade pip to latest version')
+        shprint(sh.bash, '-c', (
+            "source venv/bin/activate && pip install -U pip"
+        ), _env=copy.copy(base_env))
+'''
+new = '''        # Prepare base environment without forcing an in-venv pip upgrade.
+        # This avoids breaking python-for-android's own pip/resolvelib stack
+        # in the temporary build virtualenv.
+        base_env = dict(copy.copy(os.environ))
+        base_env["PYTHONPATH"] = ctx.get_site_packages_dir(arch)
+        info('Skipping pip upgrade in build venv')
+'''
+if old in text:
+    path.write_text(text.replace(old, new))
+    print(f"Patched {path}")
+else:
+    print(f"No matching patch block found in {path}")
+PY
 fi
 
 # ---------- 可重复构建配置 ----------
@@ -114,7 +155,7 @@ mkdir -p "$OUT_DIR"
 find "$OUT_DIR" -maxdepth 1 -type f \( -name 'hualing-0.1-arm64-v8a-debug.apk' -o -name 'hualing-0.1-arm64-v8a-debug-*.apk' \) -delete
 
 echo "Building Android APK..."
-buildozer -v android debug 2>&1 |stdbuf -i0 awk 'BEGIN {start=systime()} {now=systime(); printf "[%s][已用时: %ds] %s\n", strftime("%H:%M:%S", now), now-start, $0; fflush()}'
+buildozer -v android debug 2>&1 |awk -W interactive 'BEGIN {start=systime()} {now=systime(); printf "[%s][已用时: %ds] %s\n", strftime("%H:%M:%S", now), now-start, $0; fflush()}'
 
 SRC="$OUT_DIR/hualing-0.1-arm64-v8a-debug.apk"
 DST="$OUT_DIR/hualing-0.1-arm64-v8a-debug-${TS}.apk"

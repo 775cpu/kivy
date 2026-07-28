@@ -122,7 +122,7 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(frame_bytes)
                     self.wfile.write(b'\r\n')
 
-                    # 流畅度控频 (约 30fps)
+                    # 帧延迟限制：`time.sleep(0.033)`硬性限制最高约 30 帧；但`get_frame()`内部的画面采集逻辑最好设计为非阻塞。
                     time.sleep(0.033)
 
                 except (BrokenPipeError, ConnectionResetError):
