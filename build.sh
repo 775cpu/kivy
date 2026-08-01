@@ -155,6 +155,31 @@ mkdir -p "$OUT_DIR"
 find "$OUT_DIR" -maxdepth 1 -type f \( -name 'hualing-0.1-arm64-v8a-debug.apk' -o -name 'hualing-0.1-arm64-v8a-debug-*.apk' \) -delete
 
 echo "Building Android APK..."
+ANDROID_PROJECT_DIR=".buildozer/android/platform/build-arm64-v8a/dists/hualing"
+JNI_BUILD_DIR="$ANDROID_PROJECT_DIR/build/yolo_jni"
+JNI_LIB_DIR="$ANDROID_PROJECT_DIR/libs/arm64-v8a"
+SRC_LIB_DIR="android_src/libs/arm64-v8a"
+NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-/home/vscode/.buildozer/android/platform/android-ndk-r25b}}"
+
+if [ ! -d "$NDK_ROOT" ]; then
+    echo "Error: Android NDK not found at $NDK_ROOT" >&2
+    exit 1
+fi
+
+mkdir -p "$JNI_BUILD_DIR" "$JNI_LIB_DIR" "$SRC_LIB_DIR"
+cmake -S android_src/jni -B "$JNI_BUILD_DIR" -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
+    -DANDROID_ABI=arm64-v8a \
+    -DANDROID_PLATFORM=android-24 \
+    -DANDROID_STL=c++_shared \
+    -DANDROID_CPP_FEATURES=exceptions \
+    -DANDROID_ALLOW_UNDEFINED_SYMBOLS=TRUE
+cmake --build "$JNI_BUILD_DIR" -j4
+
+cp "$JNI_BUILD_DIR/libyolo_jni.so" "$JNI_LIB_DIR/libyolo_jni.so"
+cp "$JNI_BUILD_DIR/libyolo_jni.so" "$SRC_LIB_DIR/libyolo_jni.so"
+echo "Packed native library to $JNI_LIB_DIR/libyolo_jni.so"
+
 buildozer -v android debug 2>&1 |awk -W interactive 'BEGIN {start=systime()} {now=systime(); printf "[%s][已用时: %ds] %s\n", strftime("%H:%M:%S", now), now-start, $0; fflush()}'
 
 SRC="$OUT_DIR/hualing-0.1-arm64-v8a-debug.apk"

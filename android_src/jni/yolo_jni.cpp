@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <android/asset_manager_jni.h>
 #include <android/log.h>
+#include <array>
 #include <vector>
 #include <string>
 #include <sstream>
