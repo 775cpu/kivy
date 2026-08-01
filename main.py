@@ -398,7 +398,7 @@ def detection_worker():
     while True:
         try:
             app = App.get_running_app()
-            if app and not app.yolo_enabled:
+            if app and (not app.yolo_enabled or not getattr(app, 'yolo_ready', False)):
                 with result_lock:
                     DETECTION_RESULTS = []
                 FPS = 0
@@ -450,6 +450,7 @@ class HualingACApp(App):
     brightness_value = NumericProperty(0)
     chroma_value = NumericProperty(3)
     yolo_enabled = BooleanProperty(True)
+    yolo_ready = BooleanProperty(False)
     camera_play = BooleanProperty(False)   # 新增属性用于绑定UI按钮
 
     def build(self):
@@ -473,9 +474,15 @@ class HualingACApp(App):
                 loaded = YoloBridgeClass.initializeNativeLibrary()
                 self._log(f'YOLO native library init -> {loaded}')
                 if loaded:
-                    YoloBridgeClass.initModelFromAssets(self.context)
-                    self._log('YOLO native runtime initialized')
+                    model_ready = YoloBridgeClass.initModelFromAssets(self.context)
+                    self.yolo_ready = model_ready
+                    self._log(f'YOLO native model init -> {model_ready}')
+                    if model_ready:
+                        self._log('YOLO native runtime initialized')
+                    else:
+                        self._log('YOLO native runtime init failed: model init returned false')
                 else:
+                    self.yolo_ready = False
                     self._log('YOLO native runtime init failed: library not loaded')
             except Exception as exc:
                 self._log(f'YOLO native init failed: {exc}')
@@ -642,9 +649,37 @@ class HualingACApp(App):
             if internal_camera is None:
                 Clock.schedule_once(lambda dt: self._set_camera_orientation(), 0.3)
                 return
+
             orientation = 90 if camera.index == 0 else 270
-            internal_camera.setDisplayOrientation(orientation)
-            self._log(f'Camera orientation set to {orientation}°')
+            applied = False
+
+            for method_name in ('setDisplayOrientation', 'setPreviewOrientation', 'setRotation'):
+                if hasattr(internal_camera, method_name):
+                    try:
+                        getattr(internal_camera, method_name)(orientation)
+                        applied = True
+                        self._log(f'Camera orientation applied via {method_name} -> {orientation}°')
+                        break
+                    except Exception as exc:
+                        self._log(f'Camera orientation method {method_name} failed: {exc}')
+
+            if not applied:
+                android_camera = None
+                if hasattr(internal_camera, '_android_camera') and internal_camera._android_camera is not None:
+                    android_camera = internal_camera._android_camera
+
+                if android_camera is not None:
+                    try:
+                        params = android_camera.getParameters()
+                        params.setRotation(orientation)
+                        android_camera.setParameters(params)
+                        applied = True
+                        self._log(f'Camera orientation applied via parameters rotation -> {orientation}°')
+                    except Exception as exc:
+                        self._log(f'Camera orientation via parameters failed: {exc}')
+
+            if not applied:
+                self._log('Camera orientation not supported by this camera implementation; using default preview behavior')
         except Exception as e:
             self._log(f'Set orientation failed: {e}')
 

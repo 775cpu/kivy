@@ -3,7 +3,7 @@ title = hualing
 package.name = hualing
 package.domain = qgb
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
+source.include_exts = py,png,jpg,kv,atlas,bin,param
 
 source.exclude_dirs = androidBLE,bin,.buildozer
 

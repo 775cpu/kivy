@@ -166,7 +166,10 @@ if [ ! -d "$NDK_ROOT" ]; then
     exit 1
 fi
 
-mkdir -p "$JNI_BUILD_DIR" "$JNI_LIB_DIR" "$SRC_LIB_DIR"
+mkdir -p "$JNI_BUILD_DIR" "$JNI_LIB_DIR" "$SRC_LIB_DIR" "$ANDROID_PROJECT_DIR/src/main/assets"
+cp -f android_src/assets/yolov8n.param "$ANDROID_PROJECT_DIR/src/main/assets/yolov8n.param"
+cp -f android_src/assets/yolov8n.bin "$ANDROID_PROJECT_DIR/src/main/assets/yolov8n.bin"
+echo "Packed YOLO assets to $ANDROID_PROJECT_DIR/src/main/assets"
 cmake -S android_src/jni -B "$JNI_BUILD_DIR" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a \
