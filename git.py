@@ -252,7 +252,7 @@ def init_lfs(git_bin: str) -> bool:
 
 
 def set_remote(git_bin: str, remote_url: str):
-    """设置 origin 远程地址"""
+    """设置 origin 远程地址（供 LFS 等依赖远程名的命令使用）"""
     if remote_url:
         run_shell(git_bin, ["remote", "set-url", "origin", remote_url])
 
@@ -304,10 +304,10 @@ def clean_and_apply_lfs(git_bin: str, repo_root: Path, large_patterns: set[str])
     print(f"\n[INFO] .gitattributes 更新完成，LFS追踪总数: {len(lfs_lines)}")
 
 
-def git_pull(git_bin: str, branch: str, extra_args: list[str]):
-    """执行 pull + lfs pull"""
-    print("\n===== 执行 git pull origin " + branch + " =====")
-    cmd_args = ["pull", "--progress"] + extra_args + ["origin", branch]
+def git_pull(git_bin: str, branch: str, extra_args: list[str], remote_url: str = ""):
+    """执行 pull（使用明确 URL）+ lfs pull"""
+    print(f"\n===== 执行 git pull {remote_url} {branch} =====")
+    cmd_args = ["pull", "--progress"] + extra_args + [remote_url, branch]
     res = run_shell(git_bin, cmd_args, realtime=True)
     if res.returncode != 0:
         print("[ERROR] git pull 失败！")
@@ -316,8 +316,8 @@ def git_pull(git_bin: str, branch: str, extra_args: list[str]):
     run_shell(git_bin, ["lfs", "pull"], realtime=True)
 
 
-def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str], commit_msg: str = "auto update"):
-    """暂存、提交、推送"""
+def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str], commit_msg: str = "auto update", remote_url: str = ""):
+    """暂存、提交、推送（使用明确 URL）"""
     run_shell(git_bin, ["add", "-A"])
     diff_check = run_shell(git_bin, ["diff", "--cached", "--quiet"])
     if diff_check.returncode == 0:
@@ -325,8 +325,8 @@ def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str], 
     else:
         run_shell(git_bin, ["commit", "-m", commit_msg])
 
-    print(f"\n===== 推送 origin {branch} =====")
-    cmd_args = ["push", "-v", "--progress"] + extra_args + ["origin", branch]
+    print(f"\n===== 推送 {remote_url} {branch} =====")
+    cmd_args = ["push", "-v", "--progress"] + extra_args + [remote_url, branch]
     push_res = run_shell(git_bin, cmd_args, realtime=True)
     if push_res.returncode != 0:
         print("[ERROR] git push 失败！")
@@ -507,13 +507,14 @@ def main():
         if lfs_needed:
             clean_and_apply_lfs(git_exe, repo_root, large_files)
 
+        # 仍然设置 origin，供 LFS 等使用
         if remote_url:
             set_remote(git_exe, remote_url)
 
         if args.mode == "pull":
-            git_pull(git_exe, args.branch, extra)
+            git_pull(git_exe, args.branch, extra, remote_url)
         elif args.mode == "push":
-            git_push(git_exe, args.branch, repo_root, extra, args.commit_msg)
+            git_push(git_exe, args.branch, repo_root, extra, args.commit_msg, remote_url)
 
         print("\n✅ 操作完成！")
     except KeyboardInterrupt:
