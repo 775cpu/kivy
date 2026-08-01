@@ -31,22 +31,6 @@
 
 建议在 VS Code Codespaces 或 Dev Container 中构建。
 
-### 必要依赖
-
-- Python 3.11
-- Java / Android SDK / NDK
-- CMake
-- Pillow
-- Buildozer
-
-### 常见依赖安装
-
-```bash
-sudo apt-get update
-sudo apt-get install -y cmake
-```
-
-如果后续构建提示缺少 Rust 或 Python 依赖，可根据报错补齐对应工具链。
 
 ## 5. 构建方式
 
