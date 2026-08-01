@@ -38,7 +38,9 @@ try:
     PythonActivity = autoclass('org.kivy.android.PythonActivity')
     YoloBridgeClass = autoclass('org.qgb.yolo.YoloBridge')
     YoloBridgeInstance = YoloBridgeClass()
-except Exception:
+except Exception as exc:
+    print(f"[YoloInit] failed to resolve Java bridge classes: {exc}")
+    traceback.print_exc()
     PythonActivity = None
     YoloBridgeClass = None
     YoloBridgeInstance = None
@@ -390,6 +392,7 @@ def detection_worker():
                 return boxes
         except Exception as exc:
             print(f'[Detection] native bridge failed: {exc}')
+            traceback.print_exc()
         return None
 
     prev_time = time.time()
@@ -486,6 +489,7 @@ class HualingACApp(App):
                     self._log('YOLO native runtime init failed: library not loaded')
             except Exception as exc:
                 self._log(f'YOLO native init failed: {exc}')
+                traceback.print_exc()
 
         # 启动流服务器（与权限无关）
         t = threading.Thread(target=run_stream_server, daemon=True)

@@ -68,7 +68,10 @@ bool init_yolov8_native_model(AAssetManager* mgr, const std::string& model_name)
     const float norm_vals[3] = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
 
     const int ret = g_yolo->load(mgr, modeltype, 320, mean_vals, norm_vals, false);
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_yolov8_native_model: load ret=%d", ret);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_yolov8_native_model: load ret=%d for modeltype=%s param=%s.bin", ret, modeltype, modeltype);
+    if (ret != 0) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_yolov8_native_model: model load failed; this usually means the .param/.bin asset files are missing, the ABI is wrong, or the native model is incompatible");
+    }
     if (ret != 0) {
         delete g_yolo;
         g_yolo = nullptr;

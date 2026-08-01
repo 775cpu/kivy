@@ -5,7 +5,8 @@ package.domain = qgb
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,bin,param
 
-source.exclude_dirs = androidBLE,bin,.buildozer
+# 只打包运行时必需资源；避免把 Android 子工程、Gradle 缓存和 build 输出塞进 assets/private.tar
+source.exclude_dirs = androidBLE,bin,.buildozer,YOLOv8-Mobile,.gradle,.idea,__pycache__,.pytest_cache
 
 # 1. 图标主参数：控制桌面图标 (生成 res/mipmap/icon.png)
 icon.filename = %(source.dir)s/android_src/splash.png

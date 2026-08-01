@@ -19,11 +19,12 @@ static std::string g_last_result = "[]";
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env = nullptr;
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "JNI_OnLoad: starting, vm=%p reserved=%p", vm, reserved);
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || env == nullptr) {
-        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "JNI_OnLoad failed: cannot obtain JNIEnv");
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "JNI_OnLoad failed: cannot obtain JNIEnv from JavaVM");
         return JNI_ERR;
     }
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "JNI_OnLoad: native library loaded successfully");
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "JNI_OnLoad: native library loaded successfully, env=%p", env);
     return JNI_VERSION_1_6;
 }
 
@@ -84,7 +85,7 @@ jstring run_detection_impl(JNIEnv* env, jobject thiz, jbyteArray frame, jint wid
 }
 
 jboolean init_model_impl(JNIEnv* env, jclass klass, jobject context, jstring modelPath) {
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_model_impl: starting model init");
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_model_impl: starting model init, context=%p", context);
     const char* path = env->GetStringUTFChars(modelPath, nullptr);
     if (!path) {
         __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_model_impl: GetStringUTFChars returned null");
@@ -128,7 +129,7 @@ jboolean init_model_impl(JNIEnv* env, jclass klass, jobject context, jstring mod
     }
 
     bool ok = init_yolov8_native_model(mgr, model_name);
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_model_impl: init_yolov8_native_model result=%s", ok ? "true" : "false");
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_model_impl: init_yolov8_native_model result=%s for model=%s", ok ? "true" : "false", model_name.c_str());
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
