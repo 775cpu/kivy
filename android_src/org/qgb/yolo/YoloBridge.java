@@ -5,13 +5,20 @@ import android.util.Log;
 
 public class YoloBridge {
     private static final String TAG = "YoloBridge";
+    private static boolean sLibraryLoaded = false;
 
     static {
         try {
             System.loadLibrary("yolo_jni");
+            sLibraryLoaded = true;
         } catch (Throwable t) {
+            sLibraryLoaded = false;
             Log.w(TAG, "loadLibrary(yolo_jni) failed: " + t.getMessage());
         }
+    }
+
+    public static boolean isLibraryLoaded() {
+        return sLibraryLoaded;
     }
 
     public native String runDetection(byte[] frame, int width, int height);

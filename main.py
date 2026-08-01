@@ -372,6 +372,8 @@ def detection_worker():
     def run_native_bridge(data, width, height):
         if YoloBridgeInstance is None:
             return None
+        if YoloBridgeClass is not None and not YoloBridgeClass.isLibraryLoaded():
+            return None
         try:
             raw = YoloBridgeInstance.runDetection(data, width, height)
             payload = json.loads(raw)
