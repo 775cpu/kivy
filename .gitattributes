@@ -1,4 +1,5 @@
 .buildozer/android/platform/build-arm64-v8a/dists/hualing/src/main/assets/private.tar filter=lfs diff=lfs merge=lfs -text
 .buildozer/android/platform/python-for-android/hualing-debug-0.1.apk filter=lfs diff=lfs merge=lfs -text
 bin/hualing-0.1-arm64-v8a-debug-20260801_063502.apk filter=lfs diff=lfs merge=lfs -text
+bin/hualing-0.1-arm64-v8a-debug-20260801_071418.apk filter=lfs diff=lfs merge=lfs -text
 bin/hualing-0.1-arm64-v8a-debug.apk filter=lfs diff=lfs merge=lfs -text

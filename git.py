@@ -39,10 +39,36 @@ def parse_url_info(url: str):
     return remote_url, auth, repo_path
 
 
+def parse_size_str(val: str) -> int:
+    """解析如 100mb, 50m, 1g, 104857600 等字符串为字节数，默认 100MB"""
+    if not val:
+        return 104857600
+    s = str(val).strip().lower()
+
+    multiplier = 1
+    if s.endswith("gb") or s.endswith("g"):
+        multiplier = 1024 * 1024 * 1024
+        s = s.rstrip("gb").rstrip("g")
+    elif s.endswith("mb") or s.endswith("m"):
+        multiplier = 1024 * 1024
+        s = s.rstrip("mb").rstrip("m")
+    elif s.endswith("kb") or s.endswith("k"):
+        multiplier = 1024
+        s = s.rstrip("kb").rstrip("k")
+    elif s.endswith("b"):
+        s = s.rstrip("b")
+
+    try:
+        return int(float(s) * multiplier)
+    except ValueError:
+        return 104857600
+
+
 def preprocess_args():
     """
-    预处理参数，支持新格式：
-    git_logic.py <URL> [push|pull|init] [commit_msg] [extra...]
+    预处理参数，支持格式：
+    1. git.py <URL> [push|pull|init|list-big|remove-big] ...
+    2. git.py [list-big|remove-big|pull|push] ...
     """
     new_argv = [sys.argv[0]]
     remaining = sys.argv[1:]
@@ -62,7 +88,7 @@ def preprocess_args():
         commit_msg = None
         if remaining:
             maybe_mode = remaining[0]
-            if maybe_mode in ("push", "pull", "init"):
+            if maybe_mode in ("push", "pull", "init", "list-big", "listbig", "remove-big", "filter-repo"):
                 mode = maybe_mode
                 remaining = remaining[1:]
                 if mode == "push" and remaining and not remaining[0].startswith("-"):
@@ -96,6 +122,17 @@ def find_git(user_git: str) -> str:
         return sys_git
     print("[FATAL] 无法找到 git 可执行文件。请设置 GIT_PATH 或确保 git 在 PATH 中。")
     sys.exit(1)
+
+
+def get_origin_url(git_bin: str) -> str:
+    """尝试获取当前仓库配置的 origin 地址"""
+    try:
+        res = subprocess.run([git_bin, "remote", "get-url", "origin"], capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def run_shell(git_bin: str, args: list[str], realtime: bool = False) -> subprocess.CompletedProcess:
@@ -165,7 +202,6 @@ def install_lfs() -> bool:
     print("\n[INFO] 检测到大文件，但未找到 Git LFS，尝试自动安装...")
 
     if system == "Linux":
-        # 尝试常见包管理器
         for cmd in [
             ["sudo", "apt-get", "install", "-y", "git-lfs"],
             ["sudo", "yum", "install", "-y", "git-lfs"],
@@ -183,7 +219,6 @@ def install_lfs() -> bool:
         return False
 
     elif system == "Darwin":
-        # macOS
         if shutil.which("brew"):
             print("[INSTALL] 尝试: brew install git-lfs")
             try:
@@ -218,7 +253,8 @@ def init_lfs(git_bin: str) -> bool:
 
 def set_remote(git_bin: str, remote_url: str):
     """设置 origin 远程地址"""
-    run_shell(git_bin, ["remote", "set-url", "origin", remote_url])
+    if remote_url:
+        run_shell(git_bin, ["remote", "set-url", "origin", remote_url])
 
 
 def scan_large_files(repo_root: Path, threshold: int) -> set[str]:
@@ -297,42 +333,135 @@ def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str], 
         sys.exit(1)
 
 
+def git_list_big(git_bin: str, threshold_bytes: int) -> list[tuple[int, str, str]]:
+    """扫描 Git 历史记录中的大文件，返回 [(size_bytes, path, blob_hash), ...]"""
+    print(f"\n===== 扫描历史记录中 >= {threshold_bytes/1024/1024:.2f} MB ({threshold_bytes} 字节) 的大文件 =====")
+    try:
+        p1 = subprocess.Popen([git_bin, "rev-list", "--objects", "--all"], stdout=subprocess.PIPE, text=True)
+        p2 = subprocess.Popen([git_bin, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize) %(rest)"],
+                              stdin=p1.stdout, stdout=subprocess.PIPE, text=True)
+        p1.stdout.close()
+        output, _ = p2.communicate()
+
+        large_files = []
+        for line in output.splitlines():
+            parts = line.split(" ", 3)
+            if len(parts) >= 4 and parts[1] == "blob":
+                size = int(parts[2])
+                if size >= threshold_bytes:
+                    large_files.append((size, parts[3], parts[0]))
+
+        large_files.sort(key=lambda x: x[0], reverse=True)
+
+        if not large_files:
+            print("🎉 历史记录中未发现超过设定的文件。")
+        else:
+            print(f"{'大小 (MB)':<12} | {'Blob Hash':<40} | {'文件路径'}")
+            print("-" * 85)
+            for size, path, blob_hash in large_files:
+                print(f"{size/1024/1024:<12.2f} | {blob_hash:<40} | {path}")
+
+        return large_files
+
+    except Exception as e:
+        print(f"[ERROR] 获取历史记录大文件失败: {e}")
+        return []
+
+
+def git_remove_big(git_bin: str, threshold_bytes: int, target_hashes: list[str] = None):
+    """使用 git filter-repo 按 blob-hash 精度清理历史大文件"""
+    print(f"\n===== 准备清理历史大文件 =====")
+
+    check_cmd = run_shell(git_bin, ["filter-repo", "--version"], realtime=False)
+    if check_cmd.returncode != 0:
+        print("\n[ERROR] 未检测到 git-filter-repo 工具。")
+        print("💡 请先在终端运行安装：pip install git-filter-repo")
+        sys.exit(1)
+
+    hashes_to_remove = set()
+
+    if target_hashes:
+        for h in target_hashes:
+            cleaned = h.strip()
+            if cleaned:
+                hashes_to_remove.add(cleaned)
+        print(f"[INFO] 使用指定的 {len(hashes_to_remove)} 个 Blob Hash 进行精准删除。")
+    else:
+        large_files = git_list_big(git_bin, threshold_bytes)
+        if not large_files:
+            print("[INFO] 没有找到符合条件的大文件，无需清理。")
+            return
+
+        for _, _, blob_hash in large_files:
+            hashes_to_remove.add(blob_hash)
+
+    if not hashes_to_remove:
+        print("[INFO] 没有待清理的 Blob Hash，操作已取消。")
+        return
+
+    print(f"\n[ACTION] 即将按 Blob Hash 精准擦除以下 {len(hashes_to_remove)} 个数据节点:")
+    for h in sorted(hashes_to_remove):
+        print(f"  - Blob Hash: {h}")
+
+    hash_list_code = ", ".join([f'b"{h}"' for h in hashes_to_remove])
+    callback_code = (
+        f"target_hashes = {{{hash_list_code}}}\n"
+        f"if blob.original_id in target_hashes:\n"
+        f"    blob.skip()"
+    )
+
+    cmd_args = ["filter-repo", "--blob-callback", callback_code, "--force"]
+    res = run_shell(git_bin, cmd_args, realtime=True)
+
+    if res.returncode == 0:
+        print("\n[INFO] 历史大文件 Blob 已成功擦除！")
+        print("⚠️  注意：历史记录已被重写，推送时需使用强制推送 (git push origin master --force)。")
+    else:
+        print("[ERROR] 清理失败！")
+        sys.exit(1)
+
+
 def main():
     sys.argv = preprocess_args()
 
-    # 默认配置（可从环境变量覆盖）
     default_git = os.environ.get("GIT_PATH", "git")
     default_branch = os.environ.get("BRANCH", "master")
-    default_threshold = int(os.environ.get("SIZE_THRESHOLD", 104857600))
 
     parser = argparse.ArgumentParser(description="CQ-editor Git Auto LFS Tool")
     parser.add_argument("--git", default=default_git, help="git 可执行文件路径")
     parser.add_argument("--branch", default=default_branch, help="分支名称")
-    parser.add_argument("--threshold", type=int, default=default_threshold, help="大文件阈值（字节）")
-    parser.add_argument("--remote", default="", help="完整远程 URL（优先级最高）")
+    parser.add_argument("--size",'-s', default="100mb", help="大文件大小限制（支持 100mb, 50m, 1g 等，默认 100mb）")
+    parser.add_argument("--threshold", type=int, default=0, help="（兼容项）字节数阈值")
+    parser.add_argument("--hashes", "--hash", default="", help="手动要清理的 Blob Hash（多个用逗号隔开）")
+    parser.add_argument("--remote", default="", help="完整远程 URL")
     parser.add_argument("--auth", help="认证信息 user:token")
     parser.add_argument("--commit-msg", default="auto update", help="自定义 commit 消息")
-    parser.add_argument("mode", choices=["push", "pull", "init"], help="操作模式")
+    parser.add_argument("mode", choices=["push", "pull", "init", "list-big", "listbig", "remove-big", "filter-repo"], help="操作模式")
 
     args, extra = parser.parse_known_args()
 
-    # 远程地址构建
-    if args.remote:
-        remote_url = args.remote
-    else:
+    git_exe = find_git(args.git)
+    repo_root = Path.cwd()
+
+    # 如果未指定 --remote，则尝试自动获取本地 origin 的 URL
+    remote_url = args.remote or get_origin_url(git_exe)
+
+    # 仅在需要推送/拉取/初始化且没有配置远程时才报 FATAL
+    if not remote_url and args.mode not in ("list-big", "listbig", "remove-big", "filter-repo"):
         print("[FATAL] 必须提供远程仓库地址（直接传 URL 或通过 --remote）")
         sys.exit(1)
 
-    # 查找 Git
-    git_exe = find_git(args.git)
-
-    repo_root = Path.cwd()
+    if args.threshold > 0:
+        threshold_bytes = args.threshold
+    else:
+        threshold_bytes = parse_size_str(args.size)
 
     print(f"仓库路径: {repo_root.absolute()}")
     print(f"Git程序: {git_exe}")
     if args.mode != "init":
-        print(f"文件阈值: {args.threshold / 1024 / 1024:.2f} MB")
-    print(f"远程地址: {remote_url}")
+        print(f"文件限制: {threshold_bytes / 1024 / 1024:.2f} MB ({threshold_bytes} 字节)")
+    if remote_url:
+        print(f"远程地址: {remote_url}")
     print(f"分支: {args.branch}")
 
     try:
@@ -344,38 +473,43 @@ def main():
             print("\n✅ 初始化完成！")
             return
 
-        # ---------- 大文件扫描 ----------
-        large_files = scan_large_files(repo_root, args.threshold)
-        has_large = len(large_files) > 0
-        print(f"\n[INFO] 扫描到 {len(large_files)} 个超过阈值的文件")
+        if args.mode in ("list-big", "listbig"):
+            git_list_big(git_exe, threshold_bytes)
+            return
 
-        # ---------- LFS 强制检查 ----------
+        if args.mode in ("remove-big", "filter-repo"):
+            target_hashes = [h.strip() for h in args.hashes.split(",") if h.strip()] if args.hashes else None
+            git_remove_big(git_exe, threshold_bytes, target_hashes=target_hashes)
+            if remote_url:
+                set_remote(git_exe, remote_url)
+                print("\n✅ 远程地址已重新绑定。")
+            return
+
+        large_files = scan_large_files(repo_root, threshold_bytes)
+        has_large = len(large_files) > 0
+        print(f"\n[INFO] 扫描到 {len(large_files)} 个本地超过阈值的文件")
+
         lfs_needed = has_large
         lfs_available = check_lfs_available(git_exe)
 
         if lfs_needed and not lfs_available:
-            # 尝试自动安装
             if not install_lfs():
                 sys.exit(1)
-            # 安装后重新检查
             if not check_lfs_available(git_exe):
                 print("[FATAL] Git LFS 安装后仍然不可用，请检查环境。")
                 sys.exit(1)
             lfs_available = True
 
-        # 初始化 LFS（如果有大文件或 LFS 已安装）
         if lfs_needed or lfs_available:
             if not init_lfs(git_exe):
                 sys.exit(1)
 
-        # 如果有大文件，更新 .gitattributes
         if lfs_needed:
             clean_and_apply_lfs(git_exe, repo_root, large_files)
 
-        # 设置远程地址
-        set_remote(git_exe, remote_url)
+        if remote_url:
+            set_remote(git_exe, remote_url)
 
-        # 分发 pull / push
         if args.mode == "pull":
             git_pull(git_exe, args.branch, extra)
         elif args.mode == "push":
