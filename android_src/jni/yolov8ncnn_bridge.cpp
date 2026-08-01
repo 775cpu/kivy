@@ -1,6 +1,7 @@
 #include "yolov8ncnn_bridge.h"
 
 #include <android/asset_manager.h>
+#include <android/log.h>
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,8 @@
 #include "yolo.h"
 
 namespace {
+
+#define LOG_TAG "YoloJNIBridge"
 
 struct DetectionBox {
     float x1;
@@ -47,7 +50,9 @@ std::string build_json(const std::vector<DetectionBox>& boxes) {
 }  // namespace
 
 bool init_yolov8_native_model(AAssetManager* mgr, const std::string& model_name) {
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_yolov8_native_model: model=%s mgr=%p", model_name.c_str(), mgr);
     if (!mgr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_yolov8_native_model: asset manager is null");
         return false;
     }
 
@@ -63,6 +68,7 @@ bool init_yolov8_native_model(AAssetManager* mgr, const std::string& model_name)
     const float norm_vals[3] = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
 
     const int ret = g_yolo->load(mgr, modeltype, 320, mean_vals, norm_vals, false);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_yolov8_native_model: load ret=%d", ret);
     if (ret != 0) {
         delete g_yolo;
         g_yolo = nullptr;
@@ -73,7 +79,9 @@ bool init_yolov8_native_model(AAssetManager* mgr, const std::string& model_name)
 }
 
 std::string run_yolov8_style_detection(const uint8_t* frame, int width, int height) {
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "run_yolov8_style_detection: start w=%d h=%d frame=%p", width, height, frame);
     if (!frame || width <= 0 || height <= 0 || !g_yolo) {
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "run_yolov8_style_detection: skip due to invalid input or model not loaded");
         return "[]";
     }
 
@@ -90,5 +98,7 @@ std::string run_yolov8_style_detection(const uint8_t* frame, int width, int heig
         boxes.push_back({obj.rect.x, obj.rect.y, obj.rect.x + obj.rect.width, obj.rect.y + obj.rect.height, obj.prob, static_cast<float>(obj.label)});
     }
 
-    return build_json(boxes);
+    std::string result = build_json(boxes);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "run_yolov8_style_detection: result=%s", result.c_str());
+    return result;
 }

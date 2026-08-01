@@ -393,6 +393,7 @@ def detection_worker():
         return None
 
     prev_time = time.time()
+    last_detection_run = time.time()
     frame_count = 0
     while True:
         try:
@@ -414,6 +415,12 @@ def detection_worker():
             continue
 
         try:
+            now = time.time()
+            if now - last_detection_run < 0.2:
+                time.sleep(0.01)
+                continue
+            last_detection_run = now
+
             boxes = []
             native_boxes = run_native_bridge(data, GLOBAL_CAM_WIDTH, GLOBAL_CAM_HEIGHT)
             if native_boxes is not None:
@@ -422,7 +429,6 @@ def detection_worker():
 
             with result_lock:
                 DETECTION_RESULTS = boxes
-            now = time.time()
             frame_count += 1
             if now - prev_time >= 1.0:
                 FPS = frame_count
