@@ -17,6 +17,20 @@ extern "C" {
 
 static std::string g_last_result = "[]";
 
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || env == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "JNI_OnLoad failed: cannot obtain JNIEnv");
+        return JNI_ERR;
+    }
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "JNI_OnLoad: native library loaded successfully");
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "JNI_OnUnload: native library unloaded");
+}
+
 static std::vector<std::string> split(const std::string& s, char delim) {
     std::vector<std::string> out;
     std::stringstream ss(s);
@@ -70,25 +84,31 @@ jstring run_detection_impl(JNIEnv* env, jobject thiz, jbyteArray frame, jint wid
 }
 
 jboolean init_model_impl(JNIEnv* env, jclass klass, jobject context, jstring modelPath) {
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_model_impl: starting model init");
     const char* path = env->GetStringUTFChars(modelPath, nullptr);
     if (!path) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_model_impl: GetStringUTFChars returned null");
         return JNI_FALSE;
     }
 
     const std::string model_name(path);
     env->ReleaseStringUTFChars(modelPath, path);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_model_impl: model name=%s", model_name.c_str());
 
     if (model_name.empty()) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_model_impl: model name is empty");
         return JNI_FALSE;
     }
 
     jclass context_class = env->FindClass("android/content/Context");
     if (context_class == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_model_impl: cannot find android/content/Context");
         return JNI_FALSE;
     }
 
     jmethodID get_assets = env->GetMethodID(context_class, "getAssets", "()Landroid/content/res/AssetManager;");
     if (get_assets == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_model_impl: cannot find Context.getAssets");
         env->DeleteLocalRef(context_class);
         return JNI_FALSE;
     }
@@ -96,13 +116,20 @@ jboolean init_model_impl(JNIEnv* env, jclass klass, jobject context, jstring mod
     jobject asset_manager = env->CallObjectMethod(context, get_assets);
     env->DeleteLocalRef(context_class);
     if (asset_manager == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_model_impl: asset manager is null");
         return JNI_FALSE;
     }
 
     AAssetManager* mgr = AAssetManager_fromJava(env, asset_manager);
     env->DeleteLocalRef(asset_manager);
+    if (mgr == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "init_model_impl: AAssetManager_fromJava returned null");
+        return JNI_FALSE;
+    }
 
-    return init_yolov8_native_model(mgr, model_name) ? JNI_TRUE : JNI_FALSE;
+    bool ok = init_yolov8_native_model(mgr, model_name);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init_model_impl: init_yolov8_native_model result=%s", ok ? "true" : "false");
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 }  // namespace

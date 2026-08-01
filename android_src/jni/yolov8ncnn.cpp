@@ -131,29 +131,7 @@ static MyNdkCamera* g_camera = 0;
 
 extern "C" {
 
-JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved)
-{
-    __android_log_print(ANDROID_LOG_DEBUG, "ncnn", "JNI_OnLoad");
-
-    g_camera = new MyNdkCamera;
-
-    return JNI_VERSION_1_4;
-}
-
-JNIEXPORT void JNI_OnUnload(JavaVM* vm, void* reserved)
-{
-    __android_log_print(ANDROID_LOG_DEBUG, "ncnn", "JNI_OnUnload");
-
-    {
-        ncnn::MutexLockGuard g(lock);
-
-        delete g_yolo;
-        g_yolo = 0;
-    }
-
-    delete g_camera;
-    g_camera = 0;
-}
+// JNI_OnLoad / JNI_OnUnload are implemented in yolo_jni.cpp to avoid duplicate symbols.
 
 // public native boolean loadModel(AssetManager mgr, int modelid, int cpugpu);
 JNIEXPORT jboolean JNICALL Java_com_xvesa_yolov8mobile_Yolov8Ncnn_loadModel(JNIEnv* env, jobject thiz, jobject assetManager, jint modelid, jint cpugpu)

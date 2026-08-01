@@ -464,8 +464,13 @@ class HualingACApp(App):
         self._log('App starting...')
         if YoloBridgeClass is not None and self.context is not None:
             try:
-                YoloBridgeClass.initModelFromAssets(self.context)
-                self._log('YOLO native runtime initialized')
+                loaded = YoloBridgeClass.initializeNativeLibrary()
+                self._log(f'YOLO native library init -> {loaded}')
+                if loaded:
+                    YoloBridgeClass.initModelFromAssets(self.context)
+                    self._log('YOLO native runtime initialized')
+                else:
+                    self._log('YOLO native runtime init failed: library not loaded')
             except Exception as exc:
                 self._log(f'YOLO native init failed: {exc}')
 

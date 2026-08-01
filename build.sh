@@ -178,7 +178,10 @@ cmake --build "$JNI_BUILD_DIR" -j4
 
 cp "$JNI_BUILD_DIR/libyolo_jni.so" "$JNI_LIB_DIR/libyolo_jni.so"
 cp "$JNI_BUILD_DIR/libyolo_jni.so" "$SRC_LIB_DIR/libyolo_jni.so"
+cp /home/vscode/.buildozer/android/platform/android-ndk-r25b/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so "$JNI_LIB_DIR/libc++_shared.so"
+cp /home/vscode/.buildozer/android/platform/android-ndk-r25b/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so "$SRC_LIB_DIR/libc++_shared.so"
 echo "Packed native library to $JNI_LIB_DIR/libyolo_jni.so"
+echo "Packed libc++ runtime to $JNI_LIB_DIR/libc++_shared.so"
 
 buildozer -v android debug 2>&1 |awk -W interactive 'BEGIN {start=systime()} {now=systime(); printf "[%s][已用时: %ds] %s\n", strftime("%H:%M:%S", now), now-start, $0; fflush()}'
 
