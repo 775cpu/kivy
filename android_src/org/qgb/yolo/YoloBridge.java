@@ -9,16 +9,22 @@ public class YoloBridge {
 
     static {
         try {
+            Log.i(TAG, "Attempting to load libyolo_jni.so");
             System.loadLibrary("yolo_jni");
             sLibraryLoaded = true;
+            Log.i(TAG, "Successfully loaded libyolo_jni.so");
         } catch (Throwable t) {
             sLibraryLoaded = false;
-            Log.w(TAG, "loadLibrary(yolo_jni) failed: " + t.getMessage());
+            Log.e(TAG, "loadLibrary(yolo_jni) failed", t);
         }
     }
 
     public static boolean isLibraryLoaded() {
         return sLibraryLoaded;
+    }
+
+    public static String getLoadStatus() {
+        return sLibraryLoaded ? "loaded" : "not_loaded";
     }
 
     public native String runDetection(byte[] frame, int width, int height);

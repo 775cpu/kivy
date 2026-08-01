@@ -374,7 +374,10 @@ def detection_worker():
             print('[Detection] YoloBridgeInstance is None')
             return None
         if YoloBridgeClass is not None and not YoloBridgeClass.isLibraryLoaded():
-            print('[Detection] JNI library not loaded')
+            try:
+                print(f"[Detection] JNI library not loaded; status={YoloBridgeClass.getLoadStatus()}")
+            except Exception as exc:
+                print(f"[Detection] JNI library not loaded; status unavailable: {exc}")
             return None
         try:
             print(f'[Detection] calling native runDetection with frame {width}x{height}')
