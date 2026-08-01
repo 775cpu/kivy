@@ -371,14 +371,20 @@ def detection_worker():
     # 原生检测函数（直接使用全局桥接）
     def run_native_bridge(data, width, height):
         if YoloBridgeInstance is None:
+            print('[Detection] YoloBridgeInstance is None')
             return None
         if YoloBridgeClass is not None and not YoloBridgeClass.isLibraryLoaded():
+            print('[Detection] JNI library not loaded')
             return None
         try:
+            print(f'[Detection] calling native runDetection with frame {width}x{height}')
             raw = YoloBridgeInstance.runDetection(data, width, height)
+            print(f'[Detection] native raw result: {raw[:200]}')
             payload = json.loads(raw)
             if isinstance(payload, list):
-                return [(float(x1), float(y1), float(x2), float(y2), float(conf), int(label)) for x1, y1, x2, y2, conf, label in payload]
+                boxes = [(float(x1), float(y1), float(x2), float(y2), float(conf), int(label)) for x1, y1, x2, y2, conf, label in payload]
+                print(f'[Detection] parsed boxes: {boxes}')
+                return boxes
         except Exception as exc:
             print(f'[Detection] native bridge failed: {exc}')
         return None
@@ -733,6 +739,7 @@ class HualingACApp(App):
 
     def toggle_yolo(self):
         self.yolo_enabled = not self.yolo_enabled
+        print(f'[CameraApp] toggle_yolo -> {self.yolo_enabled}')
         self._set_status('YOLO enabled' if self.yolo_enabled else 'YOLO disabled')
 
     def update_detection_display(self, dt):
